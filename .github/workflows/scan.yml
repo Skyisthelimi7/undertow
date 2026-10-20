@@ -1,7 +1,7 @@
 name: scan
 on:
-  schedule:
-    - cron: "*/20 * * * *"      # GitHub may delay or skip scheduled runs under load; the scan is idempotent
+  schedule:                      # a backup only: GitHub often drops crons this frequent; each run starts the next
+    - cron: "7,27,47 * * * *"    # off the top of the hour, when GitHub's scheduler is busiest
   workflow_dispatch:
     inputs:
       allow_fresh:
@@ -15,6 +15,7 @@ permissions:
   contents: read
   pages: write
   id-token: write
+  actions: write                 # lets each run start the next one
 concurrency:
   group: scan
   cancel-in-progress: false
@@ -73,3 +74,15 @@ jobs:
       - if: steps.prep.outputs.go == 'true'
         id: deploy
         uses: actions/deploy-pages@v4
+      # Each run starts the next, so the page does not depend on GitHub's scheduler. A run that failed waits 10
+      # minutes first, so a broken data source cannot spin the loop. The concurrency group keeps at most one run
+      # waiting, so a chained run and a scheduled one merge instead of multiplying. To stop scanning, disable the
+      # workflow under Actions.
+      - name: Start the next scan
+        if: ${{ !cancelled() && steps.prep.outputs.go == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OUTCOME: ${{ job.status }}
+        run: |
+          if [ "$OUTCOME" != "success" ]; then sleep 600; fi
+          gh workflow run scan.yml --ref main --repo "$GITHUB_REPOSITORY"

@@ -173,8 +173,11 @@ and pass. The page says so in its summary line. GeckoTerminal and Jupiter rate l
 
 ## Free hosting
 
-`.github/workflows/scan.yml` runs the scan every 20 minutes, on every push that changes the code, and on demand
-(Actions → scan → Run workflow), then deploys `site/` to GitHub Pages. To set it up on a new repository: make it
+`.github/workflows/scan.yml` scans, deploys `site/` to GitHub Pages, and then starts the next run itself, so a new
+scan begins as soon as one ends (about every 15 to 20 minutes). GitHub's own scheduler often drops crons this
+frequent, so the cron in the file (three times an hour) is only a backup that restarts the chain if a run times out;
+a failed run waits 10 minutes before starting the next. Pushes that change the code also run it, and it can be
+started by hand (Actions → scan → Run workflow). To stop it, disable the workflow under Actions. To set it up on a new repository: make it
 **public** (unlimited Actions minutes; a private one gets 2,000 a month, which this schedule exceeds), and under
 Settings → Pages set the source to GitHub Actions. No secrets are needed.
 
