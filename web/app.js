@@ -364,7 +364,7 @@ function secondSec(k){
       clean=!(g.traps&&g.traps.length)&&!g.mintable&&!g.freezable;
   return '<section class="xr-sec"><h3>Second opinion</h3>'
     +'<p class="fine" style="margin-top:0">'+(clean?'GoPlus agrees: no live authority and no trap.':(clash?'GoPlus still sees a live authority that the chain read shows revoked; the gate goes by the chain, which updates first.':'GoPlus flags something, and the structure gate counts it.'))+'</p>'
-    +'<dl class="dl split"><dt>Mint authority</dt><dd>'+yn(g.mintable,'Revoked','Live')+'</dd><dt>Freeze authority</dt><dd>'+yn(g.freezable,'Revoked','Live')+'</dd><dt>Traps</dt><dd>'+esc(g.traps&&g.traps.length?g.traps.join(', '):'None')+'</dd><dt>Transfer fee</dt><dd>'+(g.fee_pct?pc(g.fee_pct,2):'None')+'</dd><dt>Name and image</dt><dd>'+yn(g.meta_mutable,'Locked','Changeable')+'</dd><dt>LP burned, best pool</dt><dd>'+(g.lp_burn_max==null?'n/a':pc(g.lp_burn_max,0))+'</dd></dl>'
+    +'<dl class="dl split"><dt>Mint authority</dt><dd>'+yn(g.mintable,'Revoked','Live')+'</dd><dt>Freeze authority</dt><dd>'+yn(g.freezable,'Revoked','Live')+'</dd><dt>Traps</dt><dd>'+esc(g.traps&&g.traps.length?g.traps.join(', '):'None')+'</dd><dt>Transfer fee</dt><dd>'+(g.fee_pct?pc(g.fee_pct,2):'None')+'</dd><dt>Name and image</dt><dd>'+yn(g.meta_mutable,'Locked','Changeable')+'</dd></dl>'
     +(g.meta_mutable?'<p class="fine">Changeable metadata lets the team rename the token or swap its image, a trick used to pass as another coin. Plenty of established coins keep it, so it is shown and tested in the Lab, not gated.</p>':'')
     +(g.trusted?'<p class="fine">On GoPlus’s list of trusted tokens.</p>':'')
     +'</section>';
