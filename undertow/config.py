@@ -174,9 +174,13 @@ SHADOW_RULES = [
 # established coins keep that ability.
 GP_BUDGET = 60                    # GoPlus calls per run, spent on tokens inside or about to enter
 GP_TTL_H = 12                     # re-read GoPlus for a token this often
-# RugCheck groups wallets linked by token transfers (InsightX and Bubblemaps draw the same groups as bubbles).
-# The largest group's share of supply gates like the other holder checks; the shared X routine skips at 15%.
+# RugCheck groups wallets linked by token transfers (InsightX and Bubblemaps draw the same groups as bubbles); the
+# shared X routine skips a coin when one group holds 15% or more. It is shown and tested in the Lab, not gated: on
+# 20 Oct 2026 it would have removed 5 of the 39 coins inside, one on a figure above 100% of supply and two on groups
+# of 2,000+ wallets, which are more likely an exchange's or an airdrop's than one team's. Set True to gate on it
+# like the other holder checks once the Lab's shadow rule cluster_15 shows it helps.
 MAX_CLUSTER_PCT = 15.0
+GATE_ON_CLUSTER = False
 
 # ---- Hourly tracker snapshots and storage (added 19 Oct 2026) ---------------------------------------
 # Every tracked token, in or out of the screener, is snapshotted once an hour for TRACK_DAYS after its first entry:

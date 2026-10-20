@@ -68,14 +68,22 @@ class Gates(unittest.TestCase):
         self.assertFalse({"rugged", "linked", "bundle"} & failing(gs))
         self.assertIn("authority", failing(G.evaluate(good(authority_clean=None, rc_down=True), False)))
 
-    def test_wallet_cluster_gate(self):
-        self.assertIn("cluster", failing(G.evaluate(good(cluster_pct=20.0), False)))
-        self.assertNotIn("cluster", failing(G.evaluate(good(cluster_pct=16.0), True)))        # slack for a resident
-        self.assertIn("cluster", failing(G.evaluate(good(cluster_pct=16.0), False)))          # but not for entry
-        stale = good(cluster_pct=None, cluster_skip="older RugCheck read")                    # cached before clusters
-        self.assertNotIn("cluster", failing(G.evaluate(stale, False)))
-        fresh = good(cluster_pct=40.0, launchpad="pump.fun")                                  # study range: shown only
-        self.assertNotIn("cluster", failing(G.evaluate(fresh, False)))
+    def test_wallet_cluster_shown_until_switched_on(self):
+        gs = G.evaluate(good(cluster_pct=20.0), False)
+        self.assertNotIn("cluster", failing(gs))                                              # shown, not gated
+        cl = [g for g in gs if g["id"] == "cluster"][0]
+        self.assertTrue(cl["info"]); self.assertFalse(cl["ok"])                               # but marked over the line
+        C.GATE_ON_CLUSTER = True
+        try:
+            self.assertIn("cluster", failing(G.evaluate(good(cluster_pct=20.0), False)))
+            self.assertNotIn("cluster", failing(G.evaluate(good(cluster_pct=16.0), True)))    # slack for a resident
+            self.assertIn("cluster", failing(G.evaluate(good(cluster_pct=16.0), False)))      # but not for entry
+            stale = good(cluster_pct=None, cluster_skip="older RugCheck read")                # cached before clusters
+            self.assertNotIn("cluster", failing(G.evaluate(stale, False)))
+            fresh = good(cluster_pct=40.0, launchpad="pump.fun")                              # study range: shown only
+            self.assertNotIn("cluster", failing(G.evaluate(fresh, False)))
+        finally:
+            C.GATE_ON_CLUSTER = False
 
     def test_second_opinion_adds_traps_and_shows_metadata(self):
         gs = G.evaluate(good(gp_traps=["transfer fee can be raised"]), False)
@@ -104,6 +112,7 @@ class NewSources(unittest.TestCase):
         nets = [{"size": 5, "tokenAmount": 300, "currentHolding": 50}, {"size": 3, "tokenAmount": 120, "currentHolding": 120},
                 {"size": 2, "tokenAmount": 90}]
         self.assertEqual(sources._largest_cluster(nets, 1000), (12.0, 3))        # held now, not ever received
+        self.assertEqual(sources._largest_cluster([{"size": 8665, "currentHolding": 1588}], 1000), (None, None))  # >100%
 
     def test_goplus_parse(self):
         sample = {"code": 1, "result": {"M": {

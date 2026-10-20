@@ -121,9 +121,11 @@ def evaluate(m, was_in):
         f"transfer-linked wallets ≤ {C.MAX_LINKED_HOLDER_SHARE:.0%} of holders{why}", skipped=rc_down)
     add(kind, "holders", "bundle", "Bundle signature", m.get("same_size"), lambda v: v <= C.MAX_SAME_SIZE_HOLDERS,
         f"≤ {C.MAX_SAME_SIZE_HOLDERS} near-identical balances in top holders{why}", skipped=rc_down)
-    add(kind, "holders", "cluster", "Largest wallet cluster", m.get("cluster_pct"),
+    ckind = kind if C.GATE_ON_CLUSTER else "info"
+    cwhy = why if C.GATE_ON_CLUSTER else " (shown and tested in the Lab, not gated yet)"
+    add(ckind, "holders", "cluster", "Largest wallet cluster", m.get("cluster_pct"),
         lambda v: v <= C.MAX_CLUSTER_PCT + s["cluster"],
-        f"wallets linked by transfers hold ≤ {C.MAX_CLUSTER_PCT:g}% of supply as one group{why}",
+        f"wallets linked by transfers hold ≤ {C.MAX_CLUSTER_PCT:g}% of supply as one group{cwhy}",
         skipped=rc_down or m.get("cluster_skip"))
     return gates
 

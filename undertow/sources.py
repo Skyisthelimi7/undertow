@@ -127,16 +127,18 @@ def rc_report(mint):
 def _largest_cluster(networks, supply):
     """The biggest group of wallets RugCheck links by token transfers, as (% of supply it holds now, wallets in it).
     This is the cluster InsightX and Bubblemaps draw as one bubble group. (None, None) when RugCheck did not map
-    the networks; (0.0, 0) when it mapped them and found none."""
+    the networks, or when its biggest group claims more than the whole supply (seen on 20 Oct 2026: 8,665 wallets
+    "holding" 159%), so the figure cannot be trusted; (0.0, 0) when it mapped them and found none."""
     if networks is None or not supply:
         return None, None
-    best = max((n for n in networks if isinstance(n, dict)),
-               key=lambda n: n.get("currentHolding") if n.get("currentHolding") is not None else n.get("tokenAmount") or 0,
-               default=None)
+    held = lambda n: n.get("currentHolding") if n.get("currentHolding") is not None else n.get("tokenAmount") or 0
+    best = max((n for n in networks if isinstance(n, dict)), key=held, default=None)
     if not best:
         return 0.0, 0
-    held = best.get("currentHolding") if best.get("currentHolding") is not None else best.get("tokenAmount") or 0
-    return held / supply * 100, best.get("size") or best.get("activeAccounts") or 0
+    pct = held(best) / supply * 100
+    if pct > 100:
+        return None, None
+    return pct, best.get("size") or best.get("activeAccounts") or 0
 
 
 # ---- GoPlus Security: a second opinion on the structure ----------------------------------------

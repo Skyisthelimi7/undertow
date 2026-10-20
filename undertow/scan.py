@@ -827,7 +827,7 @@ def export(st, rows, handles, now, meta, out_path):
                 "OVEREXTENDED", "TRACK_DAYS", "OUTCOME_HOURS", "MIN_AGE_MIN", "MIN_SOLD_1H", "LFDV_RED", "LFDV_GREEN",
                 "LFDV_THIN", "RISK_FLAGS", "RUG_RATE_BY_FLAGS", "DOUBLED_RATE_BY_FLAGS", "CALIBRATED_MAX_AGE_H",
                 "CALIBRATED_MAX_FDV", "MAX_RISK_FLAGS", "HOLDER_GATES_FOR_LAUNCHPADS", "TRADES_BUDGET", "TSNAP_EVERY_MIN",
-                "TSNAP_FULL_H", "SNAP_BUCKETS", "MAX_CLUSTER_PCT", "GP_TTL_H", "LIVE_URL")
+                "TSNAP_FULL_H", "SNAP_BUCKETS", "MAX_CLUSTER_PCT", "GATE_ON_CLUSTER", "GP_TTL_H", "LIVE_URL")
     lab, lab_rows = lab_report(st)
     out_dir = os.path.dirname(os.path.abspath(out_path))
     symbols = st.symbols()
