@@ -1,0 +1,75 @@
+name: scan
+on:
+  schedule:
+    - cron: "*/20 * * * *"      # GitHub may delay or skip scheduled runs under load; the scan is idempotent
+  workflow_dispatch:
+    inputs:
+      allow_fresh:
+        description: "Start from an empty history if there is no cache and no seed"
+        type: boolean
+        default: false
+  push:                          # a code change is scanned and deployed at once
+    branches: [main]
+    paths: ["undertow/**", "web/**", "build_page.py", "seed/**", ".github/workflows/scan.yml"]
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+concurrency:
+  group: scan
+  cancel-in-progress: false
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40               # a run takes 8-20 minutes on free rate limits; a slow one queues the next
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      # The SQLite file carries the history (tracker, hourly snapshots, the Lab, gate streaks) between runs in the
+      # Actions cache. The first run, or one after the cache was evicted, starts from the history saved in seed/.
+      - id: restore
+        uses: actions/cache/restore@v4
+        with:
+          path: state/undertow.db
+          key: undertow-db-never-matches
+          restore-keys: undertow-db-
+      # Never start from an empty history by accident: that run's database would be cached and replace the seed.
+      - name: Start from the saved history when the cache is empty
+        id: prep
+        run: |
+          mkdir -p state site
+          if [ ! -s state/undertow.db ] && [ -f seed/undertow.db.gz ]; then
+            gunzip -c seed/undertow.db.gz > state/undertow.db
+            echo "Started from seed/undertow.db.gz"
+          fi
+          if [ -s state/undertow.db ] || [ "${{ inputs.allow_fresh }}" = "true" ]; then
+            echo "go=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::No saved history (no cache and no seed/undertow.db.gz), so this run is skipped"
+            echo "go=false" >> "$GITHUB_OUTPUT"
+          fi
+      - if: steps.prep.outputs.go == 'true'
+        run: python3 -m undertow.scan run --db state/undertow.db --out site/data.json --cadence 20
+        env:                            # all optional; leave the secrets unset to run keyless and without alerts
+          JUP_API_KEY: ${{ secrets.JUP_API_KEY }}
+          SOLANA_RPC_URL: ${{ secrets.SOLANA_RPC_URL }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      # the page reads data.json, the CSVs and snap/ from site/, and polls DEX Screener for live prices in the browser
+      - if: steps.prep.outputs.go == 'true'
+        run: python3 build_page.py site/index.html
+      - if: steps.prep.outputs.go == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: state/undertow.db
+          key: undertow-db-${{ github.run_id }}-${{ github.run_attempt }}
+      - if: steps.prep.outputs.go == 'true'
+        uses: actions/upload-pages-artifact@v3
+        with: { path: site }
+      - if: steps.prep.outputs.go == 'true'
+        id: deploy
+        uses: actions/deploy-pages@v4

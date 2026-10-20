@@ -1,0 +1,102 @@
+<div class="wrap">
+  <header class="masthead">
+    <div class="brand">
+      <h1>Undertow</h1>
+      <p>Solana tokens on DEX pools that clear every gate, drawn by who holds the supply</p>
+    </div>
+    <div class="cartouche" aria-label="Data notes">
+      <span id="soundings">Soundings in float-cap USD</span>
+      <span id="stamp" class="stamp">Loading</span>
+      <button type="button" id="refresh" class="refresh" hidden>Refresh</button>
+      <a id="livelink" class="refresh" href="#" target="_blank" rel="noopener noreferrer" hidden>Open the live page</a>
+    </div>
+  </header>
+
+  <section class="tape" id="tape" aria-label="Summary"></section>
+
+  <div class="rail" role="toolbar" aria-label="Chart controls">
+    <div class="seg" role="group" aria-label="View">
+      <button type="button" data-view="map" aria-pressed="true">Map</button>
+      <button type="button" data-view="table" aria-pressed="false">Table</button>
+      <button type="button" data-view="tracker" aria-pressed="false">Tracker</button>
+      <button type="button" data-view="wait" aria-pressed="false">Waiting room</button>
+      <button type="button" data-view="lab" aria-pressed="false">Lab</button>
+    </div>
+    <div class="ctl" id="ctl-band">
+      <span class="ctl-label" id="lbl-band">Size band</span>
+      <div class="seg" role="group" aria-labelledby="lbl-band" id="bandseg"></div>
+    </div>
+    <div class="ctl" id="grp-ctl" hidden>
+      <span class="ctl-label" id="lbl-grp">Group by</span>
+      <div class="seg" role="group" aria-labelledby="lbl-grp">
+        <button type="button" data-group="sector" aria-pressed="true">Sector</button>
+        <button type="button" data-group="age" aria-pressed="false">Age</button>
+        <button type="button" data-group="mom" aria-pressed="false">Momentum</button>
+        <button type="button" data-group="lp" aria-pressed="false">Launchpad</button>
+      </div>
+    </div>
+    <div class="ctl" id="ctl-size">
+      <span class="ctl-label" id="lbl-size">Tile size</span>
+      <div class="seg" role="group" aria-labelledby="lbl-size">
+        <button type="button" data-size="float" aria-pressed="true">Float cap</button>
+        <button type="button" data-size="mcap" aria-pressed="false">Market cap</button>
+        <button type="button" data-size="vol" aria-pressed="false">Volume</button>
+      </div>
+    </div>
+    <div class="ctl" id="ctl-colour">
+      <span class="ctl-label" id="lbl-colour">Colour</span>
+      <div class="seg" role="group" aria-labelledby="lbl-colour">
+        <button type="button" data-colour="h1" aria-pressed="true">1h</button>
+        <button type="button" data-colour="h24" aria-pressed="false">24h</button>
+        <button type="button" data-colour="flow" aria-pressed="false">Net buying</button>
+        <button type="button" data-colour="mom" aria-pressed="false">Momentum</button>
+        <button type="button" data-colour="top10" aria-pressed="false">Top-10 share</button>
+        <button type="button" data-colour="risk" aria-pressed="false">Rug flags</button>
+      </div>
+    </div>
+    <div class="ctl" id="ctl-pos">
+      <span class="ctl-label" id="lbl-pos">Your position</span>
+      <div class="seg" role="group" aria-labelledby="lbl-pos">
+        <button type="button" data-pos="100" aria-pressed="false">$100</button>
+        <button type="button" data-pos="500" aria-pressed="true">$500</button>
+        <button type="button" data-pos="2000" aria-pressed="false">$2k</button>
+        <button type="button" data-pos="10000" aria-pressed="false">$10k</button>
+      </div>
+    </div>
+    <label class="switch" id="ctl-showband"><input type="checkbox" id="opt-band" checked><span>Controlled-supply band</span></label>
+    <div class="search"><input id="q" type="search" placeholder="Find a ticker or address" autocomplete="off" aria-label="Find a ticker or address"></div>
+  </div>
+  <p class="note" id="size-note"></p>
+
+  <main class="workspace" id="workspace">
+    <section class="stage" aria-label="Token chart">
+      <p class="caption idle" id="caption" role="status"></p>
+      <div class="map" id="map" role="group" aria-label="Token map. Each tile is a token that passes every gate; open one for its X-ray."></div>
+      <div class="tablewrap" id="tablewrap" hidden></div>
+      <div class="pane trackwrap" id="trackwrap" hidden></div>
+      <div class="pane waitwrap" id="waitwrap" hidden></div>
+      <div class="pane labwrap" id="labwrap" hidden></div>
+      <div class="legend" id="legend"></div>
+    </section>
+    <aside class="xray" id="xray" aria-label="Token X-ray" hidden></aside>
+  </main>
+
+  <section class="moves" aria-labelledby="mv-h">
+    <h2 id="mv-h">Recent moves</h2>
+    <p class="note" id="mv-note"></p>
+    <ol class="mv-list" id="mv-list"></ol>
+  </section>
+
+  <details class="how">
+    <summary>How tokens get in and out, and what the data can't tell you</summary>
+    <div class="how-body" id="how"></div>
+  </details>
+
+  <footer>
+    <p>Information only. Nothing here is a recommendation to buy or sell anything, and passing every gate does not make a token safe: most memecoins still go to zero. The gates remove the obvious traps and the thinnest markets; they can't see off-chain deals, and the free data sources can lag or be wrong.</p>
+  </footer>
+</div>
+
+<div class="tip" id="tip" hidden></div>
+<button class="scrim" id="scrim" type="button" aria-label="Close X-ray" hidden></button>
+<div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
