@@ -6,6 +6,13 @@
 
 .stamp{border:1px solid var(--line-strong);border-radius:3px;padding:0 6px;color:var(--fg-2)}
 .stamp.live{border-color:var(--ok);color:var(--ok)}
+.stamp .pulse{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--ok);margin-right:6px;vertical-align:1px;animation:ut-pulse 1.6s ease-in-out infinite}
+@keyframes ut-pulse{0%,100%{opacity:1}50%{opacity:.25}}
+@keyframes ut-up{from{filter:brightness(1.45) saturate(1.2)}to{filter:none}}
+@keyframes ut-dn{from{filter:brightness(.6)}to{filter:none}}
+.tile.flash-up{animation:ut-up 1.2s ease-out}
+.tile.flash-dn{animation:ut-dn 1.2s ease-out}
+@media (prefers-reduced-motion:reduce){.stamp .pulse,.tile.flash-up,.tile.flash-dn{animation:none}}
 .tape button{border:0;background:none;padding:0;font:inherit;color:inherit;cursor:pointer}
 .tape button:hover b{color:var(--accent)}
 
@@ -160,6 +167,9 @@
 .vchip.hurts{border-color:var(--danger);color:var(--danger)}
 .vchip.none{color:var(--fg-2)}
 .vchip.coll{color:var(--muted);border-style:dashed}
+.rv-why{max-width:44ch;white-space:normal;font-size:12px;color:var(--fg-2)}
+.rv-log{margin:6px 0 0;padding-left:18px;font-size:13px;color:var(--fg-2);display:grid;gap:4px}
+.rv-gone summary{cursor:pointer;font-size:13px;color:var(--fg-2);margin-top:8px}
 .fifths{display:block;overflow:visible}
 .fifths rect{fill:var(--accent);opacity:.75}
 .fifths .base{stroke:var(--fg-2);stroke-width:1;stroke-dasharray:2 2}

@@ -28,15 +28,24 @@ def _g(gid, label, ok, kind, group, value, rule):
             "group": group, "value": value, "rule": rule}
 
 
-def evaluate(m, was_in):
+OPS = {">=": lambda a, b: a >= b, ">": lambda a, b: a > b, "<=": lambda a, b: a <= b, "<": lambda a, b: a < b}
+
+
+def evaluate(m, was_in, policy=None):
     """m: flat metrics dict (None = unknown). was_in: token currently inside, so looser exit limits apply.
     An unknown value fails a gate for a token trying to enter, but is carried for one already in, so a transient
-    API failure does not evict it. A check whose only source is down this run is marked 'not checked' and passes."""
+    API failure does not evict it. A check whose only source is down this run is marked 'not checked' and passes.
+    policy: the weekly review's decisions. A soft gate it dropped is still computed but only shown; a candidate rule it
+    promoted gates like any rug-risk check, on the Lab variable in m['_f']."""
     s = C.EXIT_SLACK if was_in else {"mcap_low": 1, "mcap_high": 1, "vol": 1, "liq": 1, "top10": 0, "creator": 0,
                                      "linked": 0, "cluster": 0}
     gates = []
+    pol = policy or {}
+    dropped = {g: r for g, r in (pol.get("gates") or {}).items() if r.get("status") == "shown"}
 
     def add(kind, group, gid, label, val, test, rule, skipped=None):
+        if gid in dropped and kind == "soft":
+            kind, rule = "info", f"{rule} (not gated: {dropped[gid].get('short') or 'dropped by the weekly review'})"
         if val is None and skipped:
             gates.append(_g(gid, label, True, kind, group, None, f"{rule} (not checked: {skipped})"))
         elif val is None:
@@ -127,6 +136,18 @@ def evaluate(m, was_in):
         lambda v: v <= C.MAX_CLUSTER_PCT + s["cluster"],
         f"wallets linked by transfers hold ≤ {C.MAX_CLUSTER_PCT:g}% of supply as one group{cwhy}",
         skipped=rc_down or m.get("cluster_skip"))
+
+    # ---- rules the weekly review promoted from the Lab --------------------------------------------
+    f = m.get("_f") or {}
+    for c in pol.get("candidates") or []:
+        if c.get("status") != "promoted":
+            continue
+        v = f.get(c["key"])
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            v = None
+        # a promoted rule blocks on what it measured, never on a missing value: the data behind it is often partial
+        add("soft", "risk", "lab:" + c["id"], c["label"], v, lambda x, c=c: OPS[c["op"]](x, c["at"]),
+            f"{c['key']} {c['op']} {c['at']:g} (a Lab rule the weekly review promoted)", skipped="no value this scan")
     return gates
 
 

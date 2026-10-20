@@ -439,6 +439,8 @@ class LabPlumbing(unittest.TestCase):
         self.assertEqual((rows[0]["p1"], rows[0]["p6"], rows[0]["p24"], rows[0]["done"]), (1.3, 0.8, 1.1, 1))
         self.assertEqual(rows[0]["f"]["sol24"], -2.0)
         self.assertEqual(rows[0]["rules"]["v24_100k"], 0)
+        self.assertEqual(rows[0]["rules"]["g:top10"], 1)                 # every gate's own result, for the review
+        self.assertNotIn("g:devsell", rows[0]["rules"])                   # no value (dev_drop unknown), no result
         rep, lab_rows = scan.lab_report(st)
         self.assertEqual(rep["pops"]["entries"]["p24"]["base"]["n"], 1)
         self.assertEqual(rep["stats"]["entries"], 1)
@@ -602,8 +604,12 @@ class Snapshots(unittest.TestCase):
         frag = pathlib.Path(d, "f.html").read_text()
         self.assertTrue(frag.startswith("<title>Undertow</title>"))
         self.assertNotIn("<html", frag[:2000])
+        self.assertNotIn("supabase", frag)                               # the claude.ai copy has no community layer
         build_page.build(os.path.join(d, "p.html"))
-        self.assertTrue(pathlib.Path(d, "p.html").read_text().startswith("<!doctype html>"))
+        page = pathlib.Path(d, "p.html").read_text()
+        self.assertTrue(page.startswith("<!doctype html>"))
+        self.assertIn("supabase-js@2.112.3", page)                       # the GitHub page does
+        self.assertIn(".cm-modal", page)
         build_page.build(os.path.join(d, "s.html"), fragment=True, split=True)       # the published page: small
         small = pathlib.Path(d, "s.html").read_text()
         self.assertLess(len(small), 12_000)

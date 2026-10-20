@@ -25,9 +25,18 @@ def format_event(e):
 
 
 def send(events):
+    _post([format_event(e) for e in events])
+
+
+def review(changes):
+    """One message per weekly-review change: a gate dropped or restored, a rule promoted, retired or added."""
+    _post([f"UNDERTOW · weekly gate review: {c['what']} {c['label']}\n{c['reason']}" for c in changes or []
+           if c["what"] != "testing"])
+
+
+def _post(texts):
     token, chat = os.environ.get("TELEGRAM_BOT_TOKEN"), os.environ.get("TELEGRAM_CHAT_ID")
-    for e in events:
-        text = format_event(e)
+    for text in texts:
         if not (token and chat):
             print("[alert, not sent]", text.replace("\n", " | "), file=sys.stderr)
             continue

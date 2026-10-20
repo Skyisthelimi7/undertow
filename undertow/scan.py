@@ -3,6 +3,7 @@ Run:  python3 -m undertow.scan run --db undertow.db --out docs/data.json
       python3 -m undertow.scan inspect <MINT>"""
 import argparse, csv, json, os, sys, time
 from . import config as C, sources as S, gates as G, momentum as M, tgrisk, signals as SG, tracker as TR, notify, http, lab as LAB
+from . import review as REV, community as COM
 from .store import Store, TSNAP_VARS
 
 H = 3600.0
@@ -202,7 +203,12 @@ def entry_features(r):
 
 
 # ------------------------------------------------------------------ main pass
-def process(st, now, toks, budget, ds_all, jcache):
+def gate_features(m, d, j, tg=None):
+    """The Lab variables that exist when the gates run, for rules the weekly review promoted to gates."""
+    return LAB.features(d, m, j, None, None, tg, None)
+
+
+def process(st, now, toks, budget, ds_all, jcache, policy=None, crowd=None):
     events = []
     # 0. a token that was inside but is no longer priced anywhere cannot be checked, so it leaves
     for t in toks:
@@ -279,7 +285,9 @@ def process(st, now, toks, budget, ds_all, jcache):
         c = ctx(t)
         hist = history_metrics(st, t["mint"], now, c["rc"])
         m = build_metrics(c["d"], c["rc"], hist, c["j"], c["exitq"], c["rpc"], c["lock"], None, rc_down, now, c["gp"])
-        gates = G.evaluate(m, t["status"] == "IN")
+        m["crowd"] = (crowd or {}).get(t["mint"])
+        m["_f"] = gate_features(m, c["d"], c["j"])
+        gates = G.evaluate(m, t["status"] == "IN", policy)
         close = not [g for g in G.blocking(gates) if g["id"] not in ("exit", "riskflags", "telegram")]
         pre[t["mint"]] = (c, hist, m, close)
 
@@ -324,7 +332,9 @@ def process(st, now, toks, budget, ds_all, jcache):
         hist = pre[mint][1]
         was_in = t["status"] == "IN"
         m = build_metrics(d, rc, hist, j, c["exitq"], c["rpc"], c["lock"], trades.get(mint), rc_down, now, c["gp"])
-        gates = G.evaluate(m, was_in)
+        m["crowd"] = (crowd or {}).get(mint)
+        m["_f"] = gate_features(m, d, j)
+        gates = G.evaluate(m, was_in, policy)
 
         tw = handle_from_url((j or {}).get("twitter")) or handle_from_url((gt or {}).get("twitter")) or handle_from_url(d.get("twitter_url"))
         tgh = handle_from_url((j or {}).get("telegram")) or handle_from_url((gt or {}).get("telegram")) or handle_from_url(d.get("telegram_url"))
@@ -338,7 +348,8 @@ def process(st, now, toks, budget, ds_all, jcache):
                 m["tg_bot_risk"] = risk
                 tgd = {"handle": tgh, "members": cnt["members"], "online": cnt["online"], "bot_risk": risk, "why": why,
                        "growth_h": tgrisk.growth_per_hour(hist_tg), "kind": cnt["kind"]}
-                gates = G.evaluate(m, was_in)
+                m["_f"] = gate_features(m, d, j, tgd)
+                gates = G.evaluate(m, was_in, policy)
         elif tgh:
             tgd = {"handle": tgh, "members": None, "online": None, "bot_risk": None, "why": [], "growth_h": None}
         if tw:
@@ -473,7 +484,10 @@ def observe(st, rows, now, regime):
         f["band"] = G.band_of(r["d"].get("mcap") or 0)
         fails = [g["id"] for g in G.blocking(r["gates"])]
         state = ("WATCH" if r["fs"] else "IN") if to == "IN" else ("ENTERING" if r["ps"] else "OUT")
-        st.add_obs(now, r["t"]["mint"], ev, state, not fails, fails, r["d"]["price"], f, LAB.rule_results(f, C.SHADOW_RULES))
+        rules = LAB.rule_results(f, C.SHADOW_RULES)
+        # every gate's own result, gating or not, so the weekly review can judge each gate (and a dropped one) later
+        rules.update({"g:" + g["id"]: int(bool(g["ok"])) for g in r["gates"] if g["value"] is not None})
+        st.add_obs(now, r["t"]["mint"], ev, state, not fails, fails, r["d"]["price"], f, rules)
         n += 1
     if hourly:
         st.set_meta("last_obs", now)
@@ -827,13 +841,15 @@ def export(st, rows, handles, now, meta, out_path):
                 "OVEREXTENDED", "TRACK_DAYS", "OUTCOME_HOURS", "MIN_AGE_MIN", "MIN_SOLD_1H", "LFDV_RED", "LFDV_GREEN",
                 "LFDV_THIN", "RISK_FLAGS", "RUG_RATE_BY_FLAGS", "DOUBLED_RATE_BY_FLAGS", "CALIBRATED_MAX_AGE_H",
                 "CALIBRATED_MAX_FDV", "MAX_RISK_FLAGS", "HOLDER_GATES_FOR_LAUNCHPADS", "TRADES_BUDGET", "TSNAP_EVERY_MIN",
-                "TSNAP_FULL_H", "SNAP_BUCKETS", "MAX_CLUSTER_PCT", "GATE_ON_CLUSTER", "GP_TTL_H", "LIVE_URL")
+                "TSNAP_FULL_H", "SNAP_BUCKETS", "MAX_CLUSTER_PCT", "GATE_ON_CLUSTER", "GP_TTL_H", "LIVE_URL", "REVIEW",
+                "SUPABASE_URL", "SUPABASE_PUBLISHABLE_KEY", "SUPABASE_X_LOGIN", "CALL_BASE_RATE")
     lab, lab_rows = lab_report(st)
     out_dir = os.path.dirname(os.path.abspath(out_path))
     symbols = st.symbols()
     write_obs_csv(os.path.join(out_dir, "observations.csv"), lab_rows, symbols)
     n_ts = write_snapshot_files(out_dir, st, symbols)
-    doc = {"generated_at": now, "lab": lab, "meta": {**meta, "counts_in_by_band": counts,
+    review = meta.pop("review", None)
+    doc = {"generated_at": now, "published_at": time.time(), "lab": lab, "review": review, "meta": {**meta, "counts_in_by_band": counts,
            "in": sum(1 for x in toks if x["state"] in ("IN", "WATCH")), "entering": sum(1 for x in toks if x["state"] == "ENTERING"),
            "out_listed": sum(1 for x in toks if x["state"] == "OUT"), "cadence_min": C.SCAN_MINUTES, "snapshots": n_ts},
            "config": {k: getattr(C, k) for k in cfg_keys}, "slots": SLOTS,
@@ -841,7 +857,8 @@ def export(st, rows, handles, now, meta, out_path):
     with open(out_path, "w") as f:
         json.dump(clean(doc), f, separators=(",", ":"), allow_nan=False, default=lambda o: None)
     with open(os.path.join(out_dir, "version.json"), "w") as f:     # lets an open page spot a new scan cheaply
-        json.dump({"generated_at": now, "in": doc["meta"]["in"], "tracked": len(trk_rows), "snapshots": n_ts}, f)
+        json.dump({"generated_at": now, "published_at": doc["published_at"], "in": doc["meta"]["in"], "tracked": len(trk_rows),
+                   "snapshots": n_ts}, f)
     log(f"wrote {out_path}: {doc['meta']['in']} in, {doc['meta']['entering']} entering, {doc['meta']['out_listed']} listed out, {len(trk_rows)} tracked")
     return doc
 
@@ -855,6 +872,51 @@ def clean(o):
     if isinstance(o, list):
         return [clean(v) for v in o]
     return o
+
+
+def gate_meta(rows):
+    """Every gate this run computed: label, group, hard, and whether it is shown-only for every token (info)."""
+    meta = {}
+    for r in rows:
+        for g in r["gates"]:
+            if g["id"].startswith("lab:"):
+                continue
+            e = meta.setdefault(g["id"], {"label": g["label"], "group": g["group"], "hard": g["hard"], "info": True})
+            if not g["info"]:
+                e["info"] = False
+    return meta
+
+
+def candidate_pool():
+    """Rules waiting to be tested, in order: the Lab's shadow rules first, then the queued pool."""
+    return ([{"id": r[0], "label": r[1], "key": r[2], "op": r[3], "at": r[4], "source": "Lab shadow rule"} for r in C.SHADOW_RULES]
+            + [{"id": r[0], "label": r[1], "key": r[2], "op": r[3], "at": r[4], "source": "pool"} for r in C.CANDIDATE_POOL])
+
+
+def weekly_review(st, rows, now, policy):
+    """Run the gate review when it is due (every REVIEW['every_days']); store the policy the gates read next run."""
+    gmeta = gate_meta(rows)
+    if not rows or not REV.due(policy, now, C.REVIEW):
+        return policy, gmeta, []
+    lab_rows = st.lab_rows()
+    passing = sorted(LAB.populations(lab_rows)["passing"], key=lambda r: r["ts"])
+    lab_vars = [LAB.analyse_variable(passing, k, "p24", C.LAB) for k in LAB.VAR_KEYS]
+    # gates shown-only by design (not dropped) are tested as candidate rules instead
+    judged = {g: m for g, m in gmeta.items()
+              if not m["info"] or ((policy or {}).get("gates", {}).get(g) or {}).get("status") == "shown"}
+    policy, changes = REV.run_review(lab_rows, policy, judged, now, C.REVIEW, candidate_pool(), lab_vars,
+                                     set(LAB.VAR_KEYS) - C.NOT_GATEABLE, C.PINNED_GATES)
+    st.set_meta("policy", json.dumps(policy)); st.commit()
+    log(f"weekly review: {len(changes)} changes; next review {time.strftime('%d %b', time.gmtime(policy['next_review']))}")
+    return policy, gmeta, changes
+
+
+def base_rug_rate(st, now, days=14):
+    """Share of coins that passed every gate and rugged within a day, over the last fortnight: the base rate that
+    scores rug calls (None until enough have settled)."""
+    rows = [r for r in st.lab_rows() if r["ts"] >= now - days * 86400]
+    rg = [g for g in (LAB.rugged(r) for r in LAB.populations(rows)["passing"]) if g is not None]
+    return sum(rg) / len(rg) if len(rg) >= 50 else None
 
 
 def backfill(st):
@@ -879,18 +941,29 @@ def run(args):
     log(f"dexscreener: {len(ds_all)} priced")
     n_up = update_outcomes(st, ds_all, now)
     sol = S.ds_tokens([C.SOL_MINT]).get(C.SOL_MINT) or {}
-    rows, handles, events, status = process(st, now, toks, args.max_enrich, ds_all, jcache)
+    policy = json.loads(st.get_meta("policy") or "null")
+    crowd = COM.crowd() if COM.enabled() else {}
+    rows, handles, events, status = process(st, now, toks, args.max_enrich, ds_all, jcache, policy, crowd)
     n_obs = observe(st, rows, now, {"sol24": (sol.get("chg") or {}).get("h24")})
     log(f"lab: {n_obs} observations recorded, {n_up} open ones updated")
+    policy, gmeta, changes = weekly_review(st, rows, now, policy)
+    rate = base_rug_rate(st, now)
+    community = COM.sync(rows, ds_all, now, rate) if COM.enabled() else "off: no SUPABASE_SECRET_KEY"
+    log("community: " + community)
     snapshot_tracked(st, rows, ds_all, jcache, now)
     st.prune(now - C.SNAP_KEEP_H * H, now - C.TG_KEEP_DAYS * 86400); st.commit()
     meta = {"universe": len(toks), "priced": len(ds_all), "candidates": len(rows), "seconds": round(time.time() - t0),
             "sources": ["GeckoTerminal", "DEX Screener", "Jupiter", "Solana RPC", "RugCheck", "Telegram public pages"],
             "source_status": status}
+    meta["review"] = REV.for_page(policy, gmeta)
+    meta["call_base_rate"] = round(COM.base_rate(rate), 4)       # what rug calls are scored against (see community.py)
+    meta["call_base_rate_measured"] = rate is not None             # False: the default, until a fortnight has settled
+    meta["community"] = community
     doc = export(st, rows, handles, now, meta, args.out)
     write_csv(os.path.join(os.path.dirname(os.path.abspath(args.out)), "tracker.csv"), tracker_rows(st, rows, now))
     st.close()
     notify.send(events)
+    notify.review(changes)
     return doc
 
 

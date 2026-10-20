@@ -60,6 +60,7 @@ jobs:
           SOLANA_RPC_URL: ${{ secrets.SOLANA_RPC_URL }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}   # lets the scan list tokens and settle rug calls
       # the page reads data.json, the CSVs and snap/ from site/, and polls DEX Screener for live prices in the browser
       - if: steps.prep.outputs.go == 'true'
         run: python3 build_page.py site/index.html

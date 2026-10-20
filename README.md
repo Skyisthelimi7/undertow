@@ -5,7 +5,10 @@ Moonshot and others) and straight-to-DEX launches on PumpSwap, Raydium, Meteora 
 gates, tracks every token from the moment it first passes them, and publishes a single web page: a treemap sized by
 float cap, a gate checklist and rug-risk panel per token, a demand and exit read-out, a tracker of entry vs live vs
 ATH with an hourly snapshot of every tracked token, a Lab that scores which variables separate risers from fallers,
-and a waiting room for tokens that fall out. Everything runs on free data. Python 3.9+, standard library only.
+and a waiting room for tokens that fall out. Every week it reviews its own gates against what happened next, drops
+the ones that make no difference, and tests new rules. Signed-in visitors can call rugs on a public scoreboard,
+vote and tag tokens; the crowd is shown beside the gates and never changes them. Everything runs on free data.
+Python 3.9+, standard library only.
 
 ## Run it
 
@@ -30,7 +33,10 @@ The live page is **https://skyisthelimi7.github.io/undertow/**. Two pieces keep 
 * **The browser refreshes prices every 5 seconds.** Wherever the page may call other sites (GitHub Pages, any web
   host, a copy opened from disk), it asks DEX Screener for prices: tokens on the map first, then every tracked token
   in turn. Market caps, price changes, tile colours, the tracker's "now" and ATH columns and the open X-ray update in
-  place; gates, holders and the hourly snapshots come from the last scan, and the stamp says so.
+  place; gates, holders and the hourly snapshots come from the last scan, and the stamp says so ("Live prices · 3 s
+  ago · gates checked 15:40 UTC"). A failed call switches to Jupiter's price feed and back, backing off from 2 seconds
+  to a minute, for as long as the page is open; if neither answers (a content blocker or network filter), the stamp
+  says that instead of going quiet.
 
 A claude.ai Artifact cannot call other sites, so a copy published there is a snapshot that links to the live page.
 `undertow/cloud.py` can still keep such a copy updating from a Claude scheduled task (it reads the code and the
@@ -44,7 +50,8 @@ go. GitHub does the same job every 20 minutes for nothing.
 | --- | --- |
 | `JUP_API_KEY` | Free key from Jupiter's developer portal; doubles Jupiter's keyless limit (0.5 to 1 request a second) |
 | `SOLANA_RPC_URL` | Your own RPC endpoint (a free tier from any provider works). Default: Solana's public mainnet RPC |
-| `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | Posts each entry and exit to your Telegram channel. Without them alerts are only printed |
+| `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | Posts each entry and exit, and the weekly review's changes, to your Telegram channel. Without them alerts are only printed |
+| `SUPABASE_SECRET_KEY` | Lets the scan list callable tokens in Supabase and price and settle rug calls (Rug calls, below). Without it the community features stay paused |
 
 ## Scope
 
@@ -161,8 +168,78 @@ two-proportion test clears 2.5 standard errors and the lift holds in both halves
 dozens of variables and rules are tested at once). At 60 observations only differences of about 25 points can show;
 telling a 10-point improvement from luck needs about 400. Only the observations the Lab reads are stored (each
 token's first of the day, its first passing one, entries and exits), so the history stays small enough to carry
-between runs. Promote a shadow rule to a gate only when
-it helps in both halves, and re-check it monthly: thresholds drift with the market.
+between runs. Each observation also records every gate's own result, gating or not, which is what the weekly review
+reads.
+
+## The weekly gate review: which gates stay, which go, what to test next
+
+Every 7 days (`REVIEW` in the config, `undertow/review.py`) the scan judges each gate and each candidate rule on the
+last 28 days of observations, against two outcomes from the rug study: rugged (fell 80% below the observed price
+before it ever traded 50% above it, within a day) and reached +50% within a day.
+
+* **Gates** are judged on the coins each one alone blocked, against the coins that passed every gate. *Protects*:
+  its coins rugged at least 5 points more often (2.5 standard errors). *Costs*: its coins reached +50% clearly more
+  often without rugging more, or rugged clearly less. *No effect*: at least 100 settled coins on each side and rug
+  rates within 3 points. *Collecting*: fewer than 30 settled coins on either side. Otherwise *unclear*.
+* **Dropping and restoring.** Two reviews in a row of "no effect" or "costs" drop a rug-risk or holder gate. A
+  dropped gate is still computed and shown, marked "not gated" with the date and the reason, and two reviews in a row
+  of "protects" bring it back. At most one gate is dropped and one restored per review. The structure gates (a live
+  mint authority, a pullable pool) and the scope gates never change automatically: a rug rate cannot judge a
+  mechanism, and scope decides which coins are assessed at all. `PINNED_GATES` protects others.
+* **New variables.** A bench of up to 30 candidate rules is tested on the coins that passed every gate: the shadow
+  rules first, then `CANDIDATE_POOL` (20 more, from cluster size and sell pressure to organic buyers and the crowd),
+  then lines the Lab finds itself (a variable whose best line on the earlier half of the data held on the later
+  half). A new rule is judged at once on the stored observations. Two reviews in a row of "would protect" promote it
+  to a rug-risk gate, provided it keeps at least half the passing coins; two of "no effect" or "would cost" retire it
+  and the next rule takes its place, at most four new ones a week. A promoted rule is re-judged weekly on the coins
+  that passed everything else and is removed the same way; it never blocks a token for a missing value. Retired
+  rules come back for another test after 8 weeks, once the queue is empty, since thresholds drift with the market.
+  Rules on the crowd's calls, votes and tags, and on figures the scan computes after the gates, are tested but can
+  never gate.
+
+The Lab view's "Weekly gate review" table shows each gate's verdict with its numbers, every rule under test, and a
+log of each change and why it happened; changes are also posted to Telegram when alerts are set up. Expect
+"collecting" for most gates in the first weeks: a gate needs 30 settled coins that it alone blocked, and most gates
+rarely block a coin on their own.
+
+## Rug calls, votes and tags
+
+From a token's X-ray, signed-in visitors can:
+
+* **Call it**: "rugs within 24h" or "holds 24h". A call is priced at the next scan, so nobody calls with hindsight,
+  and settles 24 hours later on the study's definition. Points use r, the share of passing coins that rugged within a
+  day over the last fortnight: a right rug call scores (1 − r) / r and a wrong one −1; a right hold call +1 and a
+  wrong one −(1 − r) / r. Guessing at the base rate scores nothing on average, so the Callers scoreboard ranks skill,
+  not activity (from 5 settled calls). Ten calls a day, one open call per token, no cancelling; until a call settles
+  only the counts are public, not who made it; a token that stopped being priced for the last quarter of its day
+  voids the call.
+  Points only: no money, stakes or prizes.
+* **Vote** "worth watching" or "avoid", and **tag** it: dev active, real community, community takeover, bundled, rug
+  suspected, fake volume. Fixed tags rather than free-text comments keep moderation small.
+
+The crowd never touches the gates. Its counts are shown beside them and recorded as Lab variables (the share of open
+calls saying rug, open calls, net votes, bad tags), so the weekly review can test whether the crowd predicts
+anything; a crowd that could gate a token could be organised to, so those rules are never promoted.
+
+Sign-in is by emailed link (or X, once switched on), never a wallet. Everything lives in a free Supabase project:
+`supabase/schema.sql` creates the tables, row-level security and the four functions that are the only way a visitor
+can write (pick a name, call, vote, tag). The scan, holding the secret key, lists the callable tokens and prices and
+settles calls. Public names are visitors' own words: rename or delete one in Supabase's Table Editor (`profiles`).
+
+Setting it up, once:
+
+1. Supabase → SQL Editor → New query: paste `supabase/schema.sql` and run it. Until then the page is the plain
+   screener.
+2. Authentication → URL Configuration: set the Site URL to `https://skyisthelimi7.github.io/undertow/` and add the
+   same address under Redirect URLs, so sign-in links come back to the page.
+3. GitHub → Settings → Secrets and variables → Actions → New repository secret: `SUPABASE_SECRET_KEY`, set to the
+   secret key from Supabase → Project Settings → API Keys (it starts `sb_secret_`). It stays in GitHub; the page uses
+   only the publishable key in `config.py`. Until this is set, calls are paused and the X-ray says so.
+4. Email for everyone else: Supabase's built-in mailer delivers only to members of your Supabase team, at about 2
+   emails an hour. Before inviting the public, add custom SMTP (Authentication → Emails → SMTP Settings): a free
+   tier from a sending service with your own domain, or a dedicated Gmail account with an app password. Or switch on
+   X sign-in (Authentication → Sign In / Providers → X / Twitter (OAuth 2.0), which needs an X developer app) and
+   set `SUPABASE_X_LOGIN = True` in `config.py`.
 
 ## When a source is down
 
@@ -179,7 +256,7 @@ frequent, so the cron in the file (three times an hour) is only a backup that re
 a failed run waits 10 minutes before starting the next. Pushes that change the code also run it, and it can be
 started by hand (Actions → scan → Run workflow). To stop it, disable the workflow under Actions. To set it up on a new repository: make it
 **public** (unlimited Actions minutes; a private one gets 2,000 a month, which this schedule exceeds), and under
-Settings → Pages set the source to GitHub Actions. No secrets are needed.
+Settings → Pages set the source to GitHub Actions. Scanning needs no secrets; rug calls need `SUPABASE_SECRET_KEY`.
 
 The SQLite file is carried between runs in the Actions cache. When the cache is empty (the first run, or after
 7 days without a run, when GitHub evicts it) the scan starts from `seed/undertow.db.gz`, the history as it stood when
@@ -197,12 +274,15 @@ the page shows when the last scan ran and warns when one is overdue.
     undertow/lab.py        Lab variables, outcome updates, exit rules and statistics (pure)
     undertow/tgrisk.py     Telegram bot-risk heuristic (pure)
     undertow/momentum.py   percentile-rank momentum (pure)
+    undertow/review.py     the weekly gate review: verdicts, drops, promotions, the testing bench (pure)
+    undertow/community.py  the scan's side of rug calls: list tokens, price and settle calls, read the crowd
     undertow/notify.py     optional Telegram alerts
     undertow/store.py      SQLite
     undertow/scan.py       discover -> refresh -> enrich -> gate -> track -> observe -> snapshot -> export
     undertow/cloud.py      the claude.ai copy's cycle: restore the saved state, scan once, build, review, save the state
     seed/undertow.db.gz    the history a fresh GitHub Actions cache starts from
-    web/                   page source (style, body, app.js); build_page.py inlines it
+    supabase/schema.sql    tables, security rules and functions for rug calls, votes and tags
+    web/                   page source (style, body, app.js; community.* only in the GitHub build); build_page.py inlines it
 
 ## Known limits (read before trusting a result)
 
@@ -221,5 +301,9 @@ the page shows when the last scan ran and warns when one is overdue.
 * **The copycat-ticker check** from the study is not implemented: Jupiter's free search returns at most 20 matches.
 * **Heuristics are uncalibrated**: Telegram bot-risk, momentum quality and the non-study thresholds.
 * **X data is not free**, so only the handle is used (and checked for reuse across tokens).
+* **The weekly review tests many things at once.** Two reviews in a row and 2.5 standard errors cut the false
+  alarms, they do not remove them, and four weeks of one market regime is still one regime.
+* **The crowd can be gamed** (sock-puppet accounts, coordinated tags). That is why it never gates, and why calls are
+  scored against the base rate rather than counted.
 
 Information only; not investment advice.

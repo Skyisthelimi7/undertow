@@ -30,6 +30,8 @@ VARIABLES = [
     ("org", "Jupiter organic score", "score"), ("top10", "Top-10 holders' share", "pct"),
     ("dev", "Developer holding", "pct"), ("devm", "Deployer's launches", "n"), ("exit", "Exit cost of $500", "pct"),
     ("clu", "Largest wallet cluster, % of supply", "pct"), ("metamut", "Metadata changeable (1 = yes)", "n"),
+    ("crs", "Crowd: share of open calls saying rug", "share"), ("crn", "Crowd: open calls", "n"),
+    ("cvn", "Crowd: watch minus avoid votes", "n"), ("cfl", "Crowd: bundled and rug-suspected tags", "n"),
     ("rf", "Rug-study red flags", "n"), ("w10", "Wallets trading, 10 min", "n"), ("t5", "Top-5 buyers' share of buying", "share"),
     ("ss15", "Sells as a share of 15-min volume", "share"), ("mom", "Momentum score", "score"),
     ("ext", "Price vs 6h average", "frac"), ("dd24", "Price vs 24h high", "frac"),
@@ -76,6 +78,9 @@ def features(d, m, j, mq=None, mom=None, tg=None, regime=None):
         "top10": m.get("top10"), "dev": m.get("creator_pct"), "devm": j.get("dev_mints"), "exit": m.get("exit_cost"),
         "clu": m.get("cluster_pct"),
         "metamut": None if m.get("meta_mutable") is None else int(bool(m["meta_mutable"])),
+        # the crowd (rug calls, votes and tags from signed-in visitors), tested like any other variable
+        "crs": (m.get("crowd") or {}).get("rug_share"), "crn": (m.get("crowd") or {}).get("calls"),
+        "cvn": (m.get("crowd") or {}).get("net_votes"), "cfl": (m.get("crowd") or {}).get("bad_tags"),
         "rf": (m.get("risk") or {}).get("count"), "w10": sw.get("wallets_10m"), "t5": sw.get("top5_share"),
         "ss15": sw.get("sell_share_15m"), "mom": (mom or {}).get("score"),
         "ext": (mq or {}).get("extension"), "dd24": (mq or {}).get("drawdown_24h"),

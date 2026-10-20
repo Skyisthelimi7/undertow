@@ -1,4 +1,5 @@
-"""Assemble the page from web/style.*.css, web/body.html and web/app.js.
+"""Assemble the page from web/style.*.css, web/body.html and web/app.js, plus web/community.* (rug calls, votes and
+tags through Supabase) in every build except --fragment.
 
     python3 build_page.py OUT.html                     loads data.json (and snap/, the CSVs) from its own folder
     python3 build_page.py OUT.html --embed data.json   also carries a data snapshot inside, so it opens offline
@@ -25,6 +26,9 @@ GUARD = ("<script>setTimeout(function(){if(!window.__undertow){var s=document.ge
 def build(out_path, embed=None, fragment=False, split=False):
     css = (W / "style.base.css").read_text() + (W / "style.extra.css").read_text()
     js = (W / "app.js").read_text()
+    if not fragment:                                  # rug calls and votes need Supabase, which claude.ai would block
+        css += (W / "community.css").read_text()
+        js += "\n" + (W / "community.js").read_text()
     data = ""
     if embed:
         raw = pathlib.Path(embed).read_text()

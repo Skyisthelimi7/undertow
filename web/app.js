@@ -252,6 +252,7 @@ function fmtGate(g){
     case 'cluster':return pc(v)+' of supply';
     case 'metadata':return v?'Changeable':'Locked';
   }
+  if(String(g.id).indexOf('lab:')===0&&typeof v==='number')return Math.abs(v)>=1000?usd(v):(Math.abs(v)<10?v.toFixed(2):v.toFixed(0));
   return String(v);
 }
 /* how close each numeric soft gate is to its line, as a fraction of its allowance (0 = on the line) */
@@ -460,6 +461,7 @@ function renderXray(k){
     +studySec(k)
     +'<section class="xr-sec"><h3>Gates</h3>'+gateGroups(k)+'</section>'
     +secondSec(k)
+    +'<section class="xr-sec" id="xr-crowd" hidden></section>'
     +demandSec(k)
     +'<section class="xr-sec"><h3>Momentum</h3>'+qline+mom+'<p class="fine">Bars are percentile ranks against the other tokens that clear the hard gates. Healthy means rising on net buying with at least half the traders accumulating; overextended means more than '+pc((CFG.OVEREXTENDED||.5)*100,0)+' above its 6h average, or rising while net selling.</p></section>'
     +'<section class="xr-sec"><h3>Who holds it</h3>'+hold+'</section>'
@@ -474,6 +476,7 @@ function renderXray(k){
     +'<div class="actions"><div class="links2"><a href="https://dexscreener.com/solana/'+k.id+'" target="_blank" rel="noopener noreferrer">DEX Screener</a><a href="https://rugcheck.xyz/tokens/'+k.id+'" target="_blank" rel="noopener noreferrer">RugCheck</a><a href="https://www.geckoterminal.com/solana/tokens/'+k.id+'" target="_blank" rel="noopener noreferrer">GeckoTerminal</a><a href="https://solscan.io/token/'+k.id+'" target="_blank" rel="noopener noreferrer">Solscan</a></div><button class="btn" type="button" id="xr-copy">Copy address</button></div>'
     +checkYourself(k)+'</div>';
   wireXray(k.id);
+  emit('xray',k);
   var dw=$('#xr-dev');if(dw)dw.onclick=function(){copyText(dw.getAttribute('data-w'),'Deployer wallet copied');};
   if(k.tracker)loadHourly(k.id);
   var rg=$('#ex-range');if(rg){var upd=function(){var a=+rg.value,s=exitAt(k,a);$('#ex-out').textContent=usd(a);$('#ex-res').innerHTML='<p>Selling <b>'+usd(a)+'</b> now costs about <b>'+pc(s,s<1?2:1)+'</b>'+(s>(CFG.MAX_EXIT_COST_PCT||10)?', more than the '+pc(CFG.MAX_EXIT_COST_PCT||10,0)+' the exit gate allows':'')+'.</p>';};rg.oninput=upd;upd();}
@@ -667,6 +670,35 @@ function fifthsSvg(fs,base){
   var bl=base!=null?'<line class="base" x1="0" x2="'+W+'" y1="'+(Hh-base*Hh).toFixed(1)+'" y2="'+(Hh-base*Hh).toFixed(1)+'"/>':'';
   return '<svg class="fifths" viewBox="0 0 '+W+' '+Hh+'" width="'+W+'" height="'+Hh+'" role="img" aria-label="Share that rose in each fifth, lowest value first: '+fs.map(function(f){return pc((f.up||0)*100,0);}).join(', ')+'">'+bars+bl+'</svg>';}
 function labSeg(kind,opts,cur){return '<div class="seg" role="group">'+opts.map(function(o){return '<button type="button" data-'+kind+'="'+o[0]+'" aria-pressed="'+(o[0]===cur)+'">'+o[1]+'</button>';}).join('')+'</div>';}
+/* ---------- the weekly gate review ---------- */
+var REVW={protects:['works','Protects'],'would protect':['works','Would protect'],costs:['hurts','Costs'],'would cost':['hurts','Would cost'],
+  'no effect':['weak','No effect'],unclear:['none','Unclear'],collecting:['coll','Collecting']};
+var RSTAT={gate:'Gating',shown:'Dropped',testing:'Testing',promoted:'Promoted to gate',retired:'Retired'};
+function rvChip(v){var m=REVW[v]||REVW.collecting;return '<span class="vchip '+m[0]+'">'+m[1]+'</span>';}
+function rvSide(s){return !s||!s.n_rug?'–':pc(s.rug*100,0)+' <span class="nm">of '+int(s.n_rug)+'</span>';}
+function rvUp(s){return !s||!s.n_rug||s.up50==null?'–':pc(s.up50*100,0);}
+function ymd(ts){return ts?new Date(ts*1000).toISOString().slice(0,10):'–';}
+function reviewSec(){
+  var R=D.review;
+  if(!R)return '<section class="lab-sec"><h3>Weekly gate review</h3><p class="trk-note">The first review runs with the next scan.</p></section>';
+  var gs=(R.gates||[]).filter(function(g){return g.reviewable||g.status==='shown';}).sort(function(a,b){return (a.status==='shown')-(b.status==='shown')||String(a.label).localeCompare(b.label);});
+  var fixed=(R.gates||[]).filter(function(g){return !g.reviewable&&g.status!=='shown';});
+  var cs=(R.candidates||[]).filter(function(c){return c.status!=='retired';}).sort(function(a,b){return (a.status!=='promoted')-(b.status!=='promoted')||String(a.label).localeCompare(b.label);});
+  var gone=(R.candidates||[]).filter(function(c){return c.status==='retired';});
+  var row=function(label,status,l,why){return '<tr><td class="l">'+esc(label)+'</td><td class="l">'+esc(RSTAT[status]||status)+'</td><td>'+rvSide(l&&l.blocked)+'</td><td>'+rvSide(l&&l.passed)+'</td><td>'+rvUp(l&&l.blocked)+' / '+rvUp(l&&l.passed)+'</td><td class="l">'+rvChip(l&&l.verdict)+'</td><td class="l rv-why">'+esc(why||'')+'</td></tr>';};
+  return '<section class="lab-sec"><h3>Weekly gate review</h3>'
+    +'<p class="trk-note">Every '+((CFG.REVIEW||{}).every_days||7)+' days the scanner checks each gate against what happened next. Last review '+esc(ymd(R.last_review))+', next '+esc(ymd(R.next_review))+'. A gate is judged on the coins it alone blocked: did they rug more often than coins that passed everything? Two reviews in a row of “no effect” or “costs” drop a rug-risk or holder gate (it stays visible and can come back); structure and scope gates never change automatically. Candidate rules are judged on coins that passed every gate: two reviews in a row of “would protect” promote one to a gate, and two of “no effect” or “would cost” retire it and make room for the next variable to test. Rules on the crowd’s calls, votes and tags are tested the same way but never gate.</p>'
+    +'<div class="tscroll"><table class="grid lab"><thead><tr><th class="l">Gate</th><th class="l">Status</th><th>Rugged: blocked only by it</th><th>Rugged: passed everything</th><th>+50%: blocked / passed</th><th class="l">Verdict</th><th class="l">Why</th></tr></thead><tbody>'
+    +gs.map(function(g){return row(g.label,g.status,g.last,g.status==='shown'?g.reason:(g.last&&g.last.verdict==='collecting'?g.last.why:''));}).join('')
+    +'</tbody></table></div>'
+    +(fixed.length?'<p class="fine">Not changed automatically: '+esc(fixed.map(function(g){return g.label;}).join(', '))+'.</p>':'')
+    +'<h3 class="sub-h">Candidate rules under test</h3><div class="tscroll"><table class="grid lab"><thead><tr><th class="l">Rule</th><th class="l">Status</th><th>Rugged: it would remove</th><th>Rugged: it would keep</th><th>+50%: removed / kept</th><th class="l">Verdict</th><th class="l">Since</th></tr></thead><tbody>'
+    +cs.map(function(c){var l=c.last||{};return '<tr><td class="l">'+esc(c.label)+'</td><td class="l">'+esc(RSTAT[c.status]||c.status)+'</td><td>'+rvSide(l.blocked)+'</td><td>'+rvSide(l.passed)+'</td><td>'+rvUp(l.blocked)+' / '+rvUp(l.passed)+'</td><td class="l">'+rvChip(l.verdict)+'</td><td class="l">'+esc(ymd(c.since||c.added))+(c.source&&c.source!=='pool'?' <span class="nm">'+esc(c.source)+'</span>':'')+(c.gateable===false?' <span class="nm">tested only: never gates</span>':'')+'</td></tr>';}).join('')
+    +'</tbody></table></div>'
+    +((R.log||[]).length?'<h3 class="sub-h">Changes</h3><ul class="rv-log">'+R.log.map(function(e){return '<li><b>'+esc(ymd(e.ts))+'</b> '+esc(e.what)+': '+esc(e.label)+'. '+esc(e.reason)+'</li>';}).join('')+'</ul>':'')
+    +(gone.length?'<details class="rv-gone"><summary>Retired rules ('+gone.length+')</summary><ul class="rv-log">'+gone.map(function(c){return '<li><b>'+esc(c.label)+'</b>: '+esc(c.reason||'')+'</li>';}).join('')+'</ul></details>':'')
+    +'</section>';
+}
 function renderLab(){
   var w=$('#labwrap'),L=D.lab;
   if(!L||!L.pops){w.innerHTML='<p class="empty">The Lab starts recording with the next scan.</p>';return;}
@@ -705,7 +737,7 @@ function renderLab(){
       +top.map(function(e){return '<tr><td class="l">+'+e.tp+'%</td><td class="l">'+(e.sl?MINUS+e.sl+'%':'none')+'</td><td>'+int(e.n)+'</td><td>'+pc(e.win*100,0)+'</td><td>'+pct(e.mean)+'</td><td>'+pct(e.med)+'</td></tr>';}).join('')
       +'</tbody></table></div><p class="fine">The best eight of '+(ex.rules||[]).length+' pairs by average return. Prices are read once a run, so a spike between runs is missed and a stop fills at the next price, which can be worse; fees and slippage are not deducted. With few positions the ranking will move a lot.</p>'
       :'<p class="empty">No position has a full day behind it yet.</p>')+'</section>';}
-  w.innerHTML=head+rt+et+vt;
+  w.innerHTML=head+reviewSec()+rt+et+vt;
   $$('[data-labpop]',w).forEach(function(x){x.onclick=function(){state.labPop=x.dataset.labpop;renderLab();};});
   $$('[data-labh]',w).forEach(function(x){x.onclick=function(){state.labH=x.dataset.labh;renderLab();};});
 }
@@ -767,12 +799,12 @@ function sizeNote(){
 }
 
 /* ---------- orchestration ---------- */
-function show(view){mapEl.hidden=view!=='map';$('#tablewrap').hidden=view!=='table';$('#trackwrap').hidden=view!=='tracker';$('#waitwrap').hidden=view!=='wait';$('#labwrap').hidden=view!=='lab';}
+function show(view){mapEl.hidden=view!=='map';$('#tablewrap').hidden=view!=='table';$('#trackwrap').hidden=view!=='tracker';$('#waitwrap').hidden=view!=='wait';$('#labwrap').hidden=view!=='lab';var cw=$('#callerswrap');if(cw)cw.hidden=view!=='callers';}
 function refresh(animate){
   var v=state.view,isMap=v==='map';
   $('#grp-ctl').hidden=state.band==='all'||!isMap;
   ['#ctl-size','#ctl-colour','#ctl-showband','#size-note','#caption','#legend'].forEach(function(s){$(s).hidden=!isMap;});
-  $('#ctl-band').hidden=v==='tracker'||v==='lab';
+  $('#ctl-band').hidden=v==='tracker'||v==='lab'||v==='callers';
   $('#ctl-pos').hidden=!(isMap||v==='table');
   var blank=$('#mapblank');if(blank)blank.remove();
   show(state.view);
@@ -781,6 +813,7 @@ function refresh(animate){
   else if(state.view==='table')renderTable();
   else if(state.view==='tracker')renderTracker();
   else if(state.view==='lab')renderLab();
+  else if(state.view==='callers')emit('view','callers');
   else renderWait();
   sizeNote();
 }
@@ -819,17 +852,21 @@ function boot(data){
   if(!RM&&state.size==='float'&&state.view==='map'&&!boot.done){state.size='mcap';syncSeg('size');refresh(false);setTimeout(function(){state.size='float';syncSeg('size');refresh(true);},700);}
   else refresh(false);
   boot.done=true;
+  emit('data',D);
 }
 
 /* ---------- freshness: when the last scan ran and how often the scheduler runs it ---------- */
-var LIVE={on:false,ts:0,fails:0,timer:null,turn:0,pos:[0,0],paint:0};
+var LIVE={on:false,ts:0,fails:0,timer:null,tick:null,busy:false,turn:0,pos:[0,0],paint:0,src:'dexscreener',err:'',jn:0};
 function cadenceMin(){return (D&&D.meta&&D.meta.cadence_min)||CFG.SCAN_MINUTES||20;}
 function hhmm(ts){return new Date(ts*1000).toISOString().slice(11,16)+' UTC';}
 function renderStamp(){
   var st=$('#stamp');if(!st||!D)return;
   var cad=cadenceMin(),age=Date.now()/1000-D.generated_at,every=cad===60?'hourly':(cad>60?'every '+Math.round(cad/60)+' hours':'every '+cad+' min');
-  if(LIVE.on){st.textContent='Live prices · '+ago(LIVE.ts)+' · gates from the '+hhmm(D.generated_at)+' scan';st.className='stamp live';
-    st.title='Prices, market caps and changes come from DEX Screener every few seconds; gates, holders and the tracker’s hourly snapshots come from the last full scan.';return;}
+  if(LIVE.on){var s=Math.max(0,Math.round(Date.now()/1000-LIVE.ts));
+    st.innerHTML='<i class="pulse" aria-hidden="true"></i>Live prices · '+(s<2?'just now':s+' s ago')+' · gates checked '+hhmm(D.generated_at);st.className='stamp live';
+    st.title='Prices and market caps come from '+SRC[LIVE.src]+' every few seconds. Gates, holders and the hourly snapshots come from the scan, which reruns every 15 to 20 minutes.';return;}
+  if(LIVE.fails>=2&&SERVED&&!IN_CLAUDE){st.textContent='Live prices can’t reach this browser ('+LIVE.err+'); retrying · gates from the '+hhmm(D.generated_at)+' scan';st.className='stamp stale';
+    st.title='Neither DEX Screener nor Jupiter answered. A content blocker or network filter can cause this; the page keeps trying.';return;}
   st.title='';
   var ll=$('#livelink'),elsewhere=!!CFG.LIVE_URL&&location.href.indexOf(CFG.LIVE_URL)!==0;
   if(ll){ll.hidden=!elsewhere;if(elsewhere)ll.href=CFG.LIVE_URL;}
@@ -847,19 +884,36 @@ function liveQueues(){
   return [chunk(pri,30),chunk(TRK.map(function(x){return x.mint;}).filter(function(m){return !seen[m];}),30)];
 }
 function mergeLive(arr){
-  var best={},now=Date.now()/1000;
+  var best={},now=Date.now()/1000,moved={};
   (arr||[]).forEach(function(p){var m=p&&p.baseToken&&p.baseToken.address;if(!m)return;var k=byId[m],x=trkBy[m],want=(k&&k.pair)||(x&&x.pair),liq=(p.liquidity&&p.liquidity.usd)||0;
     if(want&&p.pairAddress===want){best[m]={p:p,exact:true};return;}
     if(best[m]&&best[m].exact)return;
     if(!best[m]||liq>((best[m].p.liquidity||{}).usd||0))best[m]={p:p};});
   Object.keys(best).forEach(function(m){var p=best[m].p,price=+p.priceUsd,k=byId[m],x=trkBy[m];if(!price)return;
     var mc=p.marketCap||p.fdv||null,v=p.volume||{},c=p.priceChange||{};
-    if(k){k.price=price;if(mc)k.cap=k.mcap=mc;if(p.fdv)k.fdv=p.fdv;if(p.liquidity&&p.liquidity.usd!=null)k.liq=p.liquidity.usd;
+    if(k){if(k.price&&price!==k.price)moved[m]=price>k.price?1:-1;
+      k.price=price;if(mc)k.cap=k.mcap=mc;if(p.fdv)k.fdv=p.fdv;if(p.liquidity&&p.liquidity.usd!=null)k.liq=p.liquidity.usd;
       if(v.h24!=null)k.vol24=v.h24;if(v.h1!=null)k.vol1h=v.h1;k.chg={m5:c.m5,h1:c.h1,h6:c.h6,h24:c.h24};
       k.fl=k.top10!=null?k.cap*(1-k.top10/100):k.cap;}
-    if(x&&x.in_price){var r=price/x.in_price;x.now_x=r;x.now_mcap=mc||r*x.in_mcap;x.live_ts=now;
-      if(x.ath_x==null||r>x.ath_x){x.ath_x=r;x.ath_mcap=x.now_mcap;x.ath_ts=now;}
-      if(x.low_x==null||r<x.low_x){x.low_x=r;x.low_ts=now;}}});
+    trackLive(x,price,mc,now);});
+  return moved;
+}
+function trackLive(x,price,mc,now){
+  if(!x||!x.in_price)return;var r=price/x.in_price;x.now_x=r;x.now_mcap=mc||r*x.in_mcap;x.live_ts=now;
+  if(x.ath_x==null||r>x.ath_x){x.ath_x=r;x.ath_mcap=x.now_mcap;x.ath_ts=now;}
+  if(x.low_x==null||r<x.low_x){x.low_x=r;x.low_ts=now;}
+}
+/* Jupiter's price feed, used when DEX Screener cannot be reached: price only, so market cap scales with it and the
+   1h change (the tile colour) stays at the scan's value */
+function mergeJup(d){
+  var moved={},now=Date.now()/1000;
+  Object.keys(d||{}).forEach(function(m){var q=d[m]||{},price=+q.usdPrice,k=byId[m];if(!price)return;
+    if(k){if(k.price&&price!==k.price)moved[m]=price>k.price?1:-1;
+      if(k.price&&k.cap)k.cap=k.mcap=k.cap*price/k.price;k.price=price;
+      if(q.priceChange24h!=null){k.chg=k.chg||{};k.chg.h24=q.priceChange24h;}
+      k.fl=k.top10!=null?k.cap*(1-k.top10/100):k.cap;}
+    trackLive(trkBy[m],price,null,now);});
+  return moved;
 }
 function liveXray(){
   if(xr.hidden||!state.selected)return;var k=byId[state.selected],x=trkBy[state.selected];
@@ -875,22 +929,48 @@ function keepPlace(sel,fn){
   w.scrollTop=t;w.scrollLeft=l;$$('.tscroll',w).forEach(function(e,i){if(inner[i])e.scrollLeft=inner[i];});
   if(k){var r=w.querySelector('tr[data-k="'+k+'"]');if(r)r.focus({preventScroll:true});}
   window.scrollTo(window.scrollX,y);}
-function repaintLive(){
+function repaintLive(moved){
   liveXray();
-  if(state.view==='map'){labelAll();return;}
+  if(state.view==='map'){labelAll();flash(moved);return;}
   var t=Date.now();if(t-LIVE.paint<15000)return;LIVE.paint=t;      /* tables redraw at most every 15 seconds */
   if(state.view==='table')keepPlace('#tablewrap',renderTable);else if(state.view==='tracker'&&state.tview==='table')keepPlace('#trackwrap',renderTracker);
 }
-function pollLive(){
-  if(!D||doc.hidden)return;
-  var q=liveQueues(),w=(LIVE.turn++%2===0||!q[1].length)?0:1;if(!q[w].length)w=1-w;if(!q[w].length)return;
-  var i=LIVE.pos[w]%q[w].length;LIVE.pos[w]=i+1;
-  fetch('https://api.dexscreener.com/tokens/v1/solana/'+q[w][i].join(','),{cache:'no-store'}).then(function(r){if(!r.ok)throw r.status;return r.json();})
-    .then(function(arr){mergeLive(arr);LIVE.on=true;LIVE.ts=Date.now()/1000;LIVE.fails=0;renderStamp();repaintLive();})
-    .catch(function(){LIVE.fails++;if(!LIVE.on&&LIVE.fails>=3){clearInterval(LIVE.timer);LIVE.timer=null;}else if(LIVE.on&&LIVE.fails>=6){LIVE.on=false;renderStamp();}});
+/* a tile whose price just moved glows for a moment, brighter for up, darker for down */
+function flash(moved){
+  if(RM)return;
+  Object.keys(moved||{}).forEach(function(m){var el=tiles[m];if(!el||!pos[m])return;var c=moved[m]>0?'flash-up':'flash-dn';
+    el.classList.remove('flash-up','flash-dn');void el.offsetWidth;el.classList.add(c);setTimeout(function(){el.classList.remove(c);},1300);});
 }
+/* A failed call backs off (2 s, then 5 s doubling to a minute) and the page keeps trying while it is open. Each
+   failure switches the source between DEX Screener and Jupiter's price feed, so one blocked host costs one try. */
+var SRC={dexscreener:'DEX Screener',jupiter:'Jupiter'};
+function liveDelay(){return LIVE.fails?Math.min(60000,LIVE.fails===1?2000:5000*Math.pow(2,LIVE.fails-2)):5000;}
+function fetchLive(src,mints){
+  var url=src==='jupiter'?'https://api.jup.ag/price/v3?ids='+mints.join(','):'https://api.dexscreener.com/tokens/v1/solana/'+mints.join(',');
+  return fetch(url,{cache:'no-store'}).then(function(r){if(!r.ok)throw new Error(SRC[src]+' answered '+r.status);return r.json();})
+    .then(function(d){return src==='jupiter'?mergeJup(d):mergeLive(d);});
+}
+function pollLive(){
+  LIVE.timer=null;
+  if(IN_CLAUDE||doc.hidden)return;                /* a hidden tab stops; showing it again starts the loop again */
+  if(!D)return schedLive();
+  var q=liveQueues(),w=(LIVE.turn++%2===0||!q[1].length)?0:1;if(!q[w].length)w=1-w;if(!q[w].length)return schedLive();
+  var i=LIVE.pos[w]%q[w].length;LIVE.pos[w]=i+1;LIVE.busy=true;
+  fetchLive(LIVE.src,q[w][i])
+    .then(function(moved){LIVE.on=true;LIVE.ts=Date.now()/1000;LIVE.fails=0;LIVE.err='';renderStamp();repaintLive(moved);
+      if(LIVE.src==='jupiter'&&++LIVE.jn%12===0)LIVE.src='dexscreener';})  /* about once a minute, try DEX Screener again: it has volume and 1h change */
+    .catch(function(e){LIVE.fails++;LIVE.err=String((e&&e.message)||'no answer');
+      LIVE.src=LIVE.src==='dexscreener'?'jupiter':'dexscreener';
+      if(LIVE.fails>=4)LIVE.on=false;renderStamp();})
+    .then(function(){LIVE.busy=false;schedLive();});
+}
+function schedLive(){if(IN_CLAUDE||LIVE.timer||doc.hidden)return;LIVE.timer=setTimeout(pollLive,liveDelay());}
 /* the claude.ai viewer blocks calls to other sites, so there the page relies on the scheduled scan alone */
-function startLive(){if(IN_CLAUDE||LIVE.timer)return;pollLive();LIVE.timer=setInterval(pollLive,5000);}
+function startLive(){
+  if(IN_CLAUDE)return;
+  if(!LIVE.timer&&!LIVE.busy)pollLive();
+  if(!LIVE.tick)LIVE.tick=setInterval(function(){if(LIVE.on||LIVE.fails)renderStamp();},1000);
+}
 
 /* ---------- CSV downloads: claude.ai's save prompt where it exists, a plain download elsewhere ---------- */
 var DL=null;
@@ -925,10 +1005,17 @@ function start(){
     startLive();});
   if(SERVED)setInterval(function(){if(!doc.hidden)checkForUpdate(false);},120000);
   setInterval(renderStamp,30000);
-  doc.addEventListener('visibilitychange',function(){if(!doc.hidden){renderStamp();checkForUpdate(false);}});
+  doc.addEventListener('visibilitychange',function(){if(!doc.hidden){renderStamp();checkForUpdate(false);if(D)startLive();}});
   var rb=$('#refresh');rb.hidden=!SERVED;
   rb.onclick=function(){checkForUpdate(true);if(LIVE.timer)pollLive();};
 }
+/* ---------- hooks for the community layer (community.js): read-only access plus events ---------- */
+var HOOKS={};
+function emit(ev,arg){(HOOKS[ev]||[]).forEach(function(fn){try{fn(arg);}catch(e){if(window.console)console.error(e);}});}
+window.Undertow={cfg:function(){return CFG;},data:function(){return D;},token:function(id){return byId[id];},
+  selected:function(){return xr.hidden?null:state.selected;},view:function(){return state.view;},
+  setView:function(v){state.view=v;syncSeg('view');refresh(false);},inClaude:IN_CLAUDE,served:SERVED,
+  on:function(ev,fn){(HOOKS[ev]=HOOKS[ev]||[]).push(fn);},toast:toast,esc:esc,usd:usd,pc:pc,ago:ago,when:when,xm:xm,int:int};
 window.__undertow=1;
 start();
 })();

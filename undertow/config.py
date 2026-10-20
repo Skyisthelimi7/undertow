@@ -5,6 +5,14 @@ import os
 # browser). Copies served anywhere else, such as a claude.ai page, link to it. Set the variable to "" to hide it.
 LIVE_URL = os.environ.get("UNDERTOW_LIVE_URL", "https://skyisthelimi7.github.io/undertow/")
 
+# Community features (rug calls, votes, crowd tags) live in Supabase. The URL and the publishable key are public by
+# design: the page uses them, and supabase/schema.sql's row-level security decides what visitors may do. The scanner
+# also needs the secret key, as the GitHub Actions secret SUPABASE_SECRET_KEY; never put that one here.
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "https://jazltffnxukxyzxmzrey.supabase.co")
+SUPABASE_PUBLISHABLE_KEY = os.environ.get("SUPABASE_PUBLISHABLE_KEY", "sb_publishable_rvF3MRF-yXr_cVptLTWG-Q_fI3tCtMy")
+SUPABASE_X_LOGIN = False          # set True once Supabase's X (Twitter) provider is switched on
+CALL_BASE_RATE = 0.10             # rug base rate for scoring calls until a fortnight of passing coins has settled
+
 # Market-cap bands used to group the map. MIN_MCAP..MAX_MCAP defines the scope: which coins are assessed.
 # The rug study found a market-cap floor is not a safety check (coins just above $20k were the riskiest in their
 # first hours), so the range is treated as scope, not as protection.
@@ -164,6 +172,46 @@ SHADOW_RULES = [
     ("cluster_15", "Largest wallet cluster holds at most 15% of supply", "clu", "<=", 15),
     ("meta_locked", "Name, symbol and image can't be changed", "metamut", "<=", 0),
     ("dev_launches_10", "Deployer has launched at most 10 tokens", "devm", "<=", 10),
+]
+
+# ---- The weekly gate review (added 20 Oct 2026; undertow/review.py says how verdicts are reached) ---------------
+# Every every_days the scanner judges each rug-risk and holder gate on the coins it alone blocked over the last
+# window_days, and each candidate rule on the coins that passed every gate. min_group settled coins per side before
+# any verdict; min_flat per side before "no effect"; differences of min_diff with z at least z count. A gate is dropped
+# (or a rule promoted) only after drop_after (promote_after) reviews in a row agree, at most max_drops and
+# max_promotions per review; a promoted rule must keep at least min_keep of passing coins. The bench holds testing
+# rules; add_per_review new ones join each week from CANDIDATE_POOL, then from the Lab's own suggested lines, then
+# rules retired at least retest_after_days ago.
+REVIEW = {"every_days": 7, "window_days": 28, "min_group": 30, "min_flat": 100, "min_diff": 0.05, "z": 2.5,
+          "flat_diff": 0.03, "flat_z": 1.0, "drop_after": 2, "promote_after": 2, "max_drops": 1, "max_promotions": 1,
+          "min_keep": 0.5, "testing": 30, "add_per_review": 4, "retest_after_days": 56}
+PINNED_GATES = ()                 # gate ids the review may report on but never drop
+# Lab variables a rule may be tested on but never promoted to a gate: the momentum read-outs and market-wide figures
+# come later in a scan than the gates, and the crowd's calls, votes and tags must never gate a token (a crowd that
+# could gate could be organised to)
+NOT_GATEABLE = {"mom", "ext", "dd24", "dd24s", "sol24", "mkt1h", "crs", "crn", "cvn", "cfl"}
+# Rules queued for testing, after the shadow rules already running. Each week the review adds up to add_per_review.
+CANDIDATE_POOL = [
+    ("cluster_10", "Largest wallet cluster holds at most 10% of supply", "clu", "<=", 10),
+    ("ss15_60", "Sells at most 60% of the last 15 minutes' volume", "ss15", "<=", 0.6),
+    ("w10_50", "At least 50 wallets traded in the last 10 minutes", "w10", ">=", 50),
+    ("t5_40", "Top-5 buyers at most 40% of buying", "t5", "<=", 0.4),
+    ("tgr_50", "Telegram bot-risk at most 50", "tgr", "<=", 50),
+    ("hc1h_up", "Holder count rising in the last hour", "hc1h", ">", 0),
+    ("liq_steady", "Liquidity not down more than 10% in the last hour", "liqc1h", ">=", -10),
+    ("ob24_100", "At least 100 organic buyers in 24h", "ob24h", ">=", 100),
+    ("bs24_1", "At least as many buys as sells over 24h", "bs24h", ">=", 1.0),
+    ("nf24_pos", "Net buying over 24h", "nf24h", ">", 0),
+    ("nfl_2", "Last hour's net buying at least 2% of liquidity", "nf1h_liq", ">=", 0.02),
+    ("turn_3", "24h volume at most 3x market cap", "turn", "<=", 3.0),
+    ("exit_5", "Selling $500 costs at most 5%", "exit", "<=", 5.0),
+    ("dev_1", "Developer holds at most 1%", "dev", "<=", 1.0),
+    ("rf_1", "At most 1 rug-study flag", "rf", "<=", 1),
+    ("age_6h", "On a DEX for at least 6 hours", "age", ">=", 6),
+    ("org_70", "Jupiter organic score at least 70", "org", ">=", 70),
+    ("crowd_rug_half", "Under half of open crowd calls say rug", "crs", "<", 0.5),
+    ("crowd_flags_0", "No 'bundled' or 'rug suspected' tags from the crowd", "cfl", "<=", 0),
+    ("crowd_watch", "More 'worth watching' than 'avoid' votes", "cvn", ">", 0),
 ]
 
 # ---- Second opinion and wallet clusters (added 20 Oct 2026) -----------------------------------------

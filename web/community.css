@@ -1,0 +1,36 @@
+/* community (GitHub page only): the sign-in dialog, the X-ray's crowd section and the Callers view */
+.cm-modal{position:fixed;inset:0;z-index:85;display:grid;place-items:center;background:var(--scrim);
+  padding:max(16px,env(safe-area-inset-top,0px)) max(16px,env(safe-area-inset-right,0px)) max(16px,env(safe-area-inset-bottom,0px)) max(16px,env(safe-area-inset-left,0px))}
+.cm-box{position:relative;width:min(440px,100%);max-height:calc(100dvh - 32px);overflow:auto;display:grid;gap:12px;
+  background:var(--surface);border:1px solid var(--line-strong);border-radius:var(--radius);box-shadow:var(--shadow);padding:20px}
+.cm-box h2{margin:0;padding-right:34px;font-family:var(--font-display);font-stretch:85%;font-weight:750;font-size:19px;letter-spacing:.02em;text-wrap:balance}
+.cm-box p{margin:0;font-size:13.5px;line-height:1.5;color:var(--fg-2)}
+.cm-box p.fine{font-size:11.5px;color:var(--muted)}
+.cm-box .cm-err{color:var(--danger);font-weight:600}
+.cm-x{position:absolute;top:12px;right:12px;width:30px;height:30px;border:1px solid var(--line);border-radius:6px;background:none;color:var(--fg-2);cursor:pointer;font-size:13px;line-height:1}
+.cm-x:hover{border-color:var(--accent);color:var(--fg)}
+.cm-form{display:grid;gap:6px}
+.cm-form label{font-size:12px;color:var(--muted)}
+.cm-form input{font:inherit;font-size:15px;padding:9px 10px;border:1px solid var(--line-strong);border-radius:6px;background:var(--surface-2);color:var(--fg);min-width:0}
+.cm-form .btn{justify-self:start;margin-top:4px}
+.cm-row{display:flex;flex-wrap:wrap;gap:8px}
+.btn:disabled{opacity:.6;cursor:default}
+.cm-form input:focus-visible,.cm-x:focus-visible,.chipbtn:focus-visible,.btn:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+#cm-me:disabled{color:var(--muted);cursor:default}
+
+.chipbtn{font:inherit;font-size:12.5px;font-weight:600;border:1px solid var(--line-strong);border-radius:999px;background:none;color:var(--fg-2);padding:4px 11px;cursor:pointer}
+.chipbtn:hover{border-color:var(--accent);color:var(--fg)}
+.chipbtn[aria-pressed="true"]{background:var(--accent-wash);border-color:var(--accent);color:var(--fg)}
+.chipbtn.bad[aria-pressed="true"]{background:var(--danger-wash);border-color:var(--danger)}
+.cr-line{margin:0;font-size:13px;display:grid;gap:3px}
+.cr-line .nm{font-size:12px}
+.cr-mine{margin:0;font-size:13px}
+.cr-btns,.cr-tags{display:flex;flex-wrap:wrap;gap:6px}
+.cr-msg{margin:0;font-size:12.5px;font-weight:600;color:var(--danger)}
+
+.callerswrap .cm-h{margin:0;font-family:var(--font-display);font-weight:750;font-size:14px;letter-spacing:.06em;text-transform:uppercase}
+.grid.lab.cm-t{min-width:560px}
+.grid.lab.cm-t td.l:first-child{min-width:0;max-width:none;white-space:nowrap}
+.grid.lab.cm-t td{font-variant-numeric:tabular-nums}
+.grid.lab.cm-t tr.me td{background:var(--accent-wash)}
+.grid.lab.cm-t tr.unranked td{color:var(--muted)}
