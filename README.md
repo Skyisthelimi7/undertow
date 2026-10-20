@@ -34,9 +34,10 @@ The live page is **https://skyisthelimi7.github.io/undertow/**. Two pieces keep 
   host, a copy opened from disk), it asks DEX Screener for prices: tokens on the map first, then every tracked token
   in turn. Market caps, price changes, tile colours, the tracker's "now" and ATH columns and the open X-ray update in
   place; gates, holders and the hourly snapshots come from the last scan, and the stamp says so ("Live prices · 3 s
-  ago · gates checked 15:40 UTC"). A failed call switches to Jupiter's price feed and back, backing off from 2 seconds
-  to a minute, for as long as the page is open; if neither answers (a content blocker or network filter), the stamp
-  says that instead of going quiet.
+  ago · gates checked 15:40 UTC"). DEX Screener's CDN keeps each answer for 30 seconds, so the page asks for a fresh
+  one (a 5-second bucket in the query string); without that, the same prices came back for half a minute at a time.
+  A failed call switches to Jupiter's price feed and back, backing off from 2 seconds to a minute, for as long as the
+  page is open; if neither answers (a content blocker or network filter), the stamp says that instead of going quiet.
 
 A claude.ai Artifact cannot call other sites, so a copy published there is a snapshot that links to the live page.
 `undertow/cloud.py` can still keep such a copy updating from a Claude scheduled task (it reads the code and the
@@ -228,18 +229,21 @@ settles calls. Public names are visitors' own words: rename or delete one in Sup
 
 Setting it up, once:
 
-1. Supabase → SQL Editor → New query: paste `supabase/schema.sql` and run it. Until then the page is the plain
-   screener.
+1. Supabase → SQL Editor → New query: paste `supabase/schema.sql` and run it (confirm the prompt about destructive
+   operations: it only drops and recreates its own policies). Until then the page is the plain screener. The
+   Security Advisor will flag the three views as security definer views; that is deliberate, since they publish
+   counts that row-level security hides row by row, and they expose no user ids, emails or open calls.
 2. Authentication → URL Configuration: set the Site URL to `https://skyisthelimi7.github.io/undertow/` and add the
    same address under Redirect URLs, so sign-in links come back to the page.
 3. GitHub → Settings → Secrets and variables → Actions → New repository secret: `SUPABASE_SECRET_KEY`, set to the
-   secret key from Supabase → Project Settings → API Keys (it starts `sb_secret_`). It stays in GitHub; the page uses
-   only the publishable key in `config.py`. Until this is set, calls are paused and the X-ray says so.
+   secret key from Supabase → Settings → API Keys (it starts `sb_secret_`). It stays in GitHub; the page uses only
+   the publishable key in `config.py`. Until this is set, calls are paused and the X-ray says so.
 4. Email for everyone else: Supabase's built-in mailer delivers only to members of your Supabase team, at about 2
-   emails an hour. Before inviting the public, add custom SMTP (Authentication → Emails → SMTP Settings): a free
-   tier from a sending service with your own domain, or a dedicated Gmail account with an app password. Or switch on
-   X sign-in (Authentication → Sign In / Providers → X / Twitter (OAuth 2.0), which needs an X developer app) and
-   set `SUPABASE_X_LOGIN = True` in `config.py`.
+   emails an hour. Before inviting the public, add custom SMTP (Authentication → SMTP settings): a free tier from a
+   sending service such as Resend or Brevo with your own domain, or a dedicated Gmail account with an app password.
+   Or switch on X sign-in (Authentication → Providers → X / Twitter (OAuth 2.0); it needs an X developer app with
+   the callback `https://<project>.supabase.co/auth/v1/callback`, a privacy policy and terms URL) and set
+   `SUPABASE_X_LOGIN = True` in `config.py`.
 
 ## When a source is down
 

@@ -946,7 +946,9 @@ function flash(moved){
 var SRC={dexscreener:'DEX Screener',jupiter:'Jupiter'};
 function liveDelay(){return LIVE.fails?Math.min(60000,LIVE.fails===1?2000:5000*Math.pow(2,LIVE.fails-2)):5000;}
 function fetchLive(src,mints){
-  var url=src==='jupiter'?'https://api.jup.ag/price/v3?ids='+mints.join(','):'https://api.dexscreener.com/tokens/v1/solana/'+mints.join(',');
+  /* DEX Screener's CDN keeps each answer for 30 seconds, so the same address polled every few seconds kept showing the
+     same prices. A 5-second bucket in the query gets a fresh answer without every viewer bypassing the cache. */
+  var url=src==='jupiter'?'https://api.jup.ag/price/v3?ids='+mints.join(','):'https://api.dexscreener.com/tokens/v1/solana/'+mints.join(',')+'?b='+Math.floor(Date.now()/5000);
   return fetch(url,{cache:'no-store'}).then(function(r){if(!r.ok)throw new Error(SRC[src]+' answered '+r.status);return r.json();})
     .then(function(d){return src==='jupiter'?mergeJup(d):mergeLive(d);});
 }
@@ -954,7 +956,8 @@ function pollLive(){
   LIVE.timer=null;
   if(IN_CLAUDE||doc.hidden)return;                /* a hidden tab stops; showing it again starts the loop again */
   if(!D)return schedLive();
-  var q=liveQueues(),w=(LIVE.turn++%2===0||!q[1].length)?0:1;if(!q[w].length)w=1-w;if(!q[w].length)return schedLive();
+  /* three polls in four go to the tokens on the map (and the open one), the fourth to the rest of the tracker */
+  var q=liveQueues(),w=(LIVE.turn++%4===3&&q[1].length)?1:0;if(!q[w].length)w=1-w;if(!q[w].length)return schedLive();
   var i=LIVE.pos[w]%q[w].length;LIVE.pos[w]=i+1;LIVE.busy=true;
   fetchLive(LIVE.src,q[w][i])
     .then(function(moved){LIVE.on=true;LIVE.ts=Date.now()/1000;LIVE.fails=0;LIVE.err='';renderStamp();repaintLive(moved);
