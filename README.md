@@ -193,8 +193,9 @@ before it ever traded 50% above it, within a day) and reached +50% within a day.
   half). A new rule is judged at once on the stored observations. Two reviews in a row of "would protect" promote it
   to a rug-risk gate, provided it keeps at least half the passing coins; two of "no effect" or "would cost" retire it
   and the next rule takes its place, at most four new ones a week. A promoted rule is re-judged weekly on the coins
-  that passed everything else and is removed the same way; it never blocks a token for a missing value. Retired
-  rules come back for another test after 8 weeks, once the queue is empty, since thresholds drift with the market.
+  that passed everything else and is removed the same way; it never blocks a token for a missing value. A rule still
+  collecting after 6 reviews (it removes almost no passing coin, or almost all) gives up its place. Retired rules
+  come back for another test after 8 weeks, once the queue is empty, since thresholds drift with the market.
   Rules on the crowd's calls, votes and tags, and on figures the scan computes after the gates, are tested but can
   never gate.
 

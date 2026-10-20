@@ -241,6 +241,11 @@ def run_review(rows, policy, gate_meta, now, cfg, pool, lab_vars=None, gateable=
                 c.update(status="retired", since=now,
                          reason=f"Retired on {_day(now)} after {n} reviews in a row: {'no difference' if verdict == 'no effect' else 'it would remove better coins'}; {why}.")
                 log("retired", c["id"], c["label"], c["reason"])
+            elif verdict == "collecting" and n >= cfg.get("stale_after", 6):
+                # it removes almost no passing coin, or almost all: it cannot be judged, so it gives up its place
+                c.update(status="retired", since=now,
+                         reason=f"Retired on {_day(now)}: still too few coins on one side after {n} reviews ({why}).")
+                log("retired", c["id"], c["label"], c["reason"])
         elif verdict in ("no effect", "would cost") and n >= cfg["drop_after"]:
             c.update(status="retired", since=now, reason=f"Removed as a gate on {_day(now)}: {why}.")
             log("dropped", "lab:" + c["id"], c["label"], c["reason"])

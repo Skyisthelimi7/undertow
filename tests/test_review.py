@@ -120,6 +120,19 @@ class Review(unittest.TestCase):
         self.assertEqual(by["dev_1"]["last"]["verdict"], "would protect")
         self.assertGreater(by["dev_1"]["last"]["blocked"]["n_rug"], 100)
 
+    def test_a_rule_that_cannot_be_judged_gives_up_its_place(self):
+        rows = cohort(0, 200, None, .1, f=lambda j, rug: {"age": 100})          # every coin is old: age >= 6 cuts none
+        pool = [{"id": "age_6h", "label": "Age", "key": "age", "op": ">=", "at": 6},
+                {"id": "next", "label": "Next", "key": "age", "op": ">=", "at": 500}]
+        cfg = {**CFG, "testing": 1}
+        pol, _ = R.run_review(rows, None, META, 12 * DAY, cfg, pool, gateable={"age"})
+        for w in range(1, 6):
+            pol, ch = R.run_review(rows, pol, META, (12 + 7 * w) * DAY, cfg, pool, gateable={"age"})
+        by = {c["id"]: c for c in pol["candidates"]}
+        self.assertEqual(by["age_6h"]["status"], "retired")
+        self.assertIn("too few coins on one side", by["age_6h"]["reason"])
+        self.assertEqual(by["next"]["status"], "testing")                 # its place went to the next rule
+
     def test_due_and_page_view(self):
         self.assertTrue(R.due(None, 0, CFG))
         pol, _ = R.run_review(self.rows(), None, META, 12 * DAY, CFG, [])

@@ -181,10 +181,11 @@ SHADOW_RULES = [
 # (or a rule promoted) only after drop_after (promote_after) reviews in a row agree, at most max_drops and
 # max_promotions per review; a promoted rule must keep at least min_keep of passing coins. The bench holds testing
 # rules; add_per_review new ones join each week from CANDIDATE_POOL, then from the Lab's own suggested lines, then
-# rules retired at least retest_after_days ago.
+# rules retired at least retest_after_days ago. A rule still "collecting" after stale_after reviews (it removes almost
+# no passing coin, or almost all) gives up its place.
 REVIEW = {"every_days": 7, "window_days": 28, "min_group": 30, "min_flat": 100, "min_diff": 0.05, "z": 2.5,
           "flat_diff": 0.03, "flat_z": 1.0, "drop_after": 2, "promote_after": 2, "max_drops": 1, "max_promotions": 1,
-          "min_keep": 0.5, "testing": 30, "add_per_review": 4, "retest_after_days": 56}
+          "min_keep": 0.5, "testing": 30, "add_per_review": 4, "retest_after_days": 56, "stale_after": 6}
 PINNED_GATES = ()                 # gate ids the review may report on but never drop
 # Lab variables a rule may be tested on but never promoted to a gate: the momentum read-outs and market-wide figures
 # come later in a scan than the gates, and the crowd's calls, votes and tags must never gate a token (a crowd that
