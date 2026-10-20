@@ -88,8 +88,8 @@ change, organic buyers, deployer launch history, whether name and image can stil
 score and momentum quality, the rug-risk panel, and the largest wallet cluster: the biggest group of wallets
 RugCheck links by token transfers (what InsightX and Bubblemaps draw as one bubble group), marked when it holds 15%
 of supply or more. The cluster stays ungated until the Lab shows it helps: on 20 Oct 2026 it would have removed 5 of
-the 39 coins inside, one on a figure above 100% of supply and two on groups of 2,000+ wallets, which look more like
-an exchange's or an airdrop's than one team's (`GATE_ON_CLUSTER` switches it on). The Lab tests three rules from a
+the 39 coins inside, two of them on groups of 2,000 and 8,665 wallets (the second "holding" 159% of supply), which
+look more like an exchange's or an airdrop's wallets than one team's (`GATE_ON_CLUSTER` switches it on). The Lab tests three rules from a
 free rug-check routine shared on X as shadow rules before any of them gates: largest cluster at most 15%, metadata
 locked, and a deployer with at most 10 launches. SolSniffer's score and InsightX's cluster API need paid keys at a screener's volume (SolSniffer's
 free plan is 100 calls a month), so the X-ray links to both sites and copies the deployer wallet for SolSniffer's
