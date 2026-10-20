@@ -221,7 +221,7 @@ function row(x,i){return '<tr class="'+(i==null?'unranked':'')+(name&&x.name===n
 function paintCallers(){
   var w=$('#callerswrap');if(!w||U.view()!=='callers')return;
   var D=U.data()||{},M=D.meta||{},r=M.call_base_rate||(CFG&&CFG.CALL_BASE_RATE)||0.1,k=Math.round((1-r)/r*10)/10;
-  var rateTxt=M.call_base_rate_measured?'Over the last fortnight '+Math.round(r*100)+'% of coins that passed every gate rugged within a day'
+  var rateTxt=M.call_base_rate_measured?'Recently '+Math.round(r*100)+'% of coins that passed every gate rugged within a day (the last two weeks, or all the history there is)'
     :'Until a fortnight of passing coins has settled, calls are scored as if '+Math.round(r*100)+'% of them rug within a day';
   var ranked=(board||[]).filter(function(x){return x.settled>=MIN_RANKED;}),rest=(board||[]).filter(function(x){return x.settled<MIN_RANKED;});
   var head='<div class="trk-head"><h2 class="cm-h">Callers</h2>'
