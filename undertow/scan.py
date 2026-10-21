@@ -1336,13 +1336,14 @@ def trade_step(st, rows, ds_all, now, regime, bank=None, sampler=None, t_dec=Non
     if policy:
         # rules on new data (attention, the minute data) and the models' rules join the bench at once (trade.add_rules)
         added = TRD.add_rules(policy, C.ATTENTION_RULES, now, ATTN_SOURCE)
+        added += TRD.sync_rules(policy, [r for r in C.FAST_RULES if r["exit"] in exits], now)
         added += TRD.add_rules(policy, [r for r in C.FAST_RULES if r["exit"] in exits], now, "quick rule, minute data")
         if MOD and bank and (bank.summary or {}).get("status") == "ok":
             added += TRD.add_rules(policy, MOD.rules_for(bank.summary), now, "model")
         if added:
             changes = changes + added
             st.set_meta("trade_policy", json.dumps(policy))
-            log(f"trade bench: {len(added)} rules added for testing")
+            log(f"trade bench: {len(added)} rules added for testing or redefined")
         if bank and bank.fresh and feats:
             recent = st.tpath(now - (C.MODELS["seq_steps"] + 2) * 1800)      # the LSTM reads each coin's last scans
             seqs = {m: (recent[m], len(recent[m]) - 1) for m in feats if m in recent}

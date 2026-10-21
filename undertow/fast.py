@@ -96,8 +96,8 @@ class Book:
                 continue
             if f is None:
                 f = {**self.eligible[m], **MIN.features(coin, t, self.ads.at(m, ts))}
-            if not (MIN.draw(m, ts, rid, r["random"]) if r.get("random") else TRD.fires(r, f)):
-                continue
+            if not TRD.fires(r, f) or (r.get("random") and not MIN.draw(m, ts, rid, r["random"])):
+                continue                   # a random control keeps its conditions (the pool floor) and then draws
             live = r["status"] == "live" and m not in self.held
             keys = TRD.SHOWN_AT_ENTRY + list(MIN.KEYS) + [c[0] for c in r.get("all") or []]
             s = {"id": None, "rule": rid, "mint": m, "sym": self.syms.get(m), "in_ts": ts, "in_price": t["price"],

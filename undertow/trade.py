@@ -710,5 +710,29 @@ def add_rules(policy, rules, now, source):
     return changes
 
 
+def sync_rules(policy, rules, now, keys=("all", "label", "exit", "random")):
+    """Redefine rules already on the bench whose definition changed in the config, while they are still under test:
+    the new definition replaces the old and the record restarts, since trades made under the old one say nothing about
+    the new one. A live or retired rule keeps its definition. Returns the changes, which also go to the policy's log."""
+    by = {r["id"]: r for r in policy["rules"]}
+    changes = []
+    for d in rules:
+        r = by.get(d["id"])
+        if not r or r["status"] != "testing" or all(r.get(k) == d.get(k) for k in keys):
+            continue
+        for k in keys:
+            if d.get(k) is None:
+                r.pop(k, None)
+            else:
+                r[k] = d[k]
+        r.update(added=now, since=now, streak=None,
+                 last={"ts": now, "verdict": "collecting", "fwd": {"n": 0}, "bt": {"n": 0},
+                       "why": "forward: no settled trades yet (redefined)"})
+        changes.append({"ts": now, "what": "redefined", "id": r["id"], "label": r["label"],
+                        "reason": f"Redefined on {_day(now)}: its record restarts with the new definition."})
+    policy["log"] = ((policy.get("log") or []) + changes)[-200:]
+    return changes
+
+
 def due(policy, now, cfg):
     return not policy or not policy.get("last_review") or now - policy["last_review"] >= cfg["every_days"] * 86400 - 1800

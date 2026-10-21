@@ -274,8 +274,11 @@ so the minutes are nearly continuous: the gap is about two minutes a scan, a run
 * **Quick rules** (`FAST_RULES`): a breakout on volume, a climb up the 5-minute trending list, fresh boosts, a dip
   turning, quiet accumulation, momentum and a running ad, each with its own quick exit (15 minutes to 2 hours: targets
   of 5 or 10%, stops of 5 to 7%, a trailing stop), and a random control that buys a random 0.5% of minutes. They may buy
-  a coin only if it passed every gate at the previous scan, since the running scan's gates are not known yet; a rule
-  buys a coin again only once its last trade there has closed and 30 minutes have passed. Each is judged on its own
+  a coin only if it passed every gate at the previous scan, since the running scan's gates are not known yet, and only
+  if its pool holds $75,000 or more: at $500 a side a round trip costs about 4.6% there (fees plus price impact), so a
+  +5% target barely breaks even, and on a $20,000 pool even a +10% target loses about 2%. A rule buys a coin again only
+  once its last trade there has closed and 30 minutes have passed. Changing a quick rule in the config redefines it on
+  the bench and restarts its record while it is under test. Each is judged on its own
   exit against the same bar as every rule, and promoted or retired at the same weekly review. Every quick trade is
   priced under every quick exit and the live exit too, and the tab compares them on the quick entries; quick trades
   are kept out of the comparison that picks the live exit for the scan's rules.

@@ -532,22 +532,27 @@ ML_STUDY = {
 # paper trade is stepped on those minutes, and the quick rules below may buy coins that passed every gate at the
 # previous scan (whose gates were known by then), provided that scan is no more than stale_scan_min minutes old. A
 # quick rule buys a coin again only once its last trade on it has closed and reentry_min minutes have passed since it
-# bought. Quick exits are compared on quick trades against baseline_exit. Minute readings are kept keep_h hours, feed
-# entries feed_keep_days days.
+# bought. Quick rules trade only pools holding min_liq dollars or more: at $500 a side, a round trip costs about 4.6%
+# at $75k (fees plus price impact), so a +5% target barely breaks even there and loses below it (at $20k a +10% target
+# still loses 2%). Quick exits are compared on quick trades against baseline_exit. Minute readings are kept keep_h
+# hours, feed entries feed_keep_days days.
 FAST = {"every_s": 60, "slow_every": 2, "max_coins": 240, "watch_recent_h": 2, "keep_h": 24, "feed_keep_days": 7,
-        "stale_scan_min": 45, "reentry_min": 30, "baseline_exit": "q5_sl5_1h"}
+        "stale_scan_min": 45, "reentry_min": 30, "baseline_exit": "q5_sl5_1h", "min_liq": 75_000}
 
 
 def _quick(rid, label, exit_id, *conds, random=None):
-    r = {**_rule(rid, label, *conds), "fast": True, "exit": exit_id, "source": "quick rule, minute data"}
+    r = {**_rule(rid, label, *conds, ("liq", ">=", FAST["min_liq"])), "fast": True, "exit": exit_id,
+         "source": "quick rule, minute data"}
     if random:
         r["random"] = random
     return r
 
 
-# Quick entry rules, checked every minute on coins that passed every gate at the previous scan. Each is judged on its
-# own exit (quick ones, 30 minutes to 2 hours), on trades it made after joining the bench, against the same bar as
-# every rule. fast_random buys a random 0.5% of coin-minutes (about 15 trades an hour): what any quick entry has to beat.
+# Quick entry rules, checked every minute on coins that passed every gate at the previous scan and hold min_liq in their
+# pool. Each is judged on its own exit (quick ones, 30 minutes to 2 hours), on trades it made after joining the bench,
+# against the same bar as every rule. fast_random buys a random 0.5% of coin-minutes on the same coins (about 10
+# trades an hour): what any quick entry has to beat. Changing a quick rule here redefines it on the bench and restarts
+# its record (trade.sync_rules), as long as it is still under test.
 FAST_RULES = [
     _quick("fast_breakout", "Quick breakout: up 3%+ in 5 min on 2x the hour's volume pace, buyers ahead, under 25% off "
            "its 30-min low", "q10_sl7_2h", ("m5", ">=", 3), ("v5x", ">=", 2), ("bs5", ">=", 1.2), ("up30", "<", 25)),
@@ -563,6 +568,6 @@ FAST_RULES = [
            "its 30-min low", "qtrail7_arm5_2h", ("m15", ">=", 5), ("m5", ">=", 1), ("v5x", ">=", 1.5), ("up30", "<", 30)),
     _quick("fast_ad_running", "A DEX Screener ad seen in the last day, under 15% off its 30-min low", "q5_sl5_1h",
            ("ad_imp", ">=", 1), ("up30", "<", 15)),
-    _quick("fast_random", "Random control: a random 0.5% of minutes on coins passing every gate", "q5_sl5_1h",
-           random=0.005),
+    _quick("fast_random", "Random control: a random 0.5% of minutes on coins passing every gate, pools of $75k+",
+           "q5_sl5_1h", random=0.005),
 ]

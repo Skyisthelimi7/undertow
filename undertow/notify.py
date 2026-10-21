@@ -50,7 +50,8 @@ def trade(changes, page, now):
         out.append(f"UNDERTOW · buy signal (paper): {x['sym']} at {x['in_price']:.4g}, {_usd(x.get('in_mc'))} market cap"
                    f"\nRule: {x['rule']}; exit: {page.get('exit', {}).get('label', '')}{stop}"
                    f"\nhttps://dexscreener.com/solana/{x['mint']}\nA rule's paper record, not a recommendation. Most memecoins go to zero.")
-    out += [f"UNDERTOW · trade review: {c['what']} {c['label']}\n{c['reason']}" for c in changes or [] if c["what"] != "testing"]
+    out += [f"UNDERTOW · trade review: {c['what']} {c['label']}\n{c['reason']}" for c in changes or []
+            if c["what"] not in ("testing", "redefined")]
     _post(out)
 
 

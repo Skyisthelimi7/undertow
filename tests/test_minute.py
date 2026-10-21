@@ -150,6 +150,13 @@ class MinuteLedger(unittest.TestCase):
         self.assertEqual(alerts, [("buy", "A")])
         self.assertIn("A", b.held)
 
+    def test_quick_rules_skip_thin_pools_and_the_random_control_too(self):
+        rnd = quick_rule("fast_random", random=1.0)
+        self.assertIn(["liq", ">=", C.FAST["min_liq"]], rnd["all"])
+        b = book(rules=[rnd], eligible={"A": {}, "B": {}})
+        b.round([tick(60.0, "A", 1.0, liq=C.FAST["min_liq"] - 1), tick(60.0, "B", 1.0, liq=C.FAST["min_liq"])])
+        self.assertEqual([s["mint"] for s in b.new], ["B"])
+
     def test_held_coins_open_paper_trades_only(self):
         rnd = quick_rule("fast_random", status="live")
         b = book(rules=[rnd], eligible={"A": {}}, held={"A"})
@@ -287,6 +294,22 @@ class ScanSide(unittest.TestCase):
         self.assertEqual(q["n_trades"], len(quick))
         self.assertTrue(all(b["id"] not in [x["id"] for x in q["rules"]] or b.get("fast") for b in page["bench"]))
         self.assertTrue(any(e["base"] for e in q["exits"]))
+
+
+class Redefine(unittest.TestCase):
+    def test_a_changed_quick_rule_restarts_its_record_while_under_test(self):
+        pol = T.new_policy(C.EXIT_POOL, C.DEFAULT_EXIT)
+        old = [{**r, "all": [c for c in r["all"] if c[0] != "liq"]} for r in C.FAST_RULES]
+        T.add_rules(pol, old, 100.0, "test")
+        live = next(r for r in pol["rules"] if r["id"] == "fast_momentum")
+        live.update(status="live", since=150.0)
+        ch = T.sync_rules(pol, C.FAST_RULES, 200.0)
+        self.assertEqual(len(ch), len(C.FAST_RULES) - 1)                    # the live one keeps its definition
+        r = next(r for r in pol["rules"] if r["id"] == "fast_breakout")
+        self.assertIn(["liq", ">=", C.FAST["min_liq"]], r["all"])
+        self.assertEqual((r["added"], r["since"], r["last"]["verdict"]), (200.0, 200.0, "collecting"))
+        self.assertNotIn(["liq", ">=", C.FAST["min_liq"]], live["all"])
+        self.assertEqual(T.sync_rules(pol, C.FAST_RULES, 300.0), [])         # nothing changed since
 
 
 class TrainRequest(unittest.TestCase):
