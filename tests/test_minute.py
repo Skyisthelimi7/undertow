@@ -289,6 +289,27 @@ class ScanSide(unittest.TestCase):
         self.assertTrue(all(s["in_ts"] > now for s in quick))
         self.assertEqual(minute["opened"], len(quick))
         self.assertIn("m5", feats["A"])                                     # the scan's minute variables
+        # a scan rule's buy fills at decision time at the latest minute price, not at the scan's older reading
+        st.db.execute("DELETE FROM tsig WHERE rule='unpushed_liquid'"); st.commit()   # free to buy again
+        pol2 = json.loads(st.get_meta("trade_policy"))
+        for r in pol2["rules"]:
+            if r["id"] == "unpushed_liquid":
+                r["all"] = []                                               # fires on every passing coin
+        st.set_meta("trade_policy", json.dumps(pol2)); st.commit()
+        with FakeSources({"A": 1.3, "B": 1.0}):
+            later = now + 900
+            SC.scan_step(st, ds, later, exits, C.TRADE)
+            sm = SC.start_minutes(st, later, ds, {"gt5m": ["A"]}, exits, set())
+            deadline = time.time() + 10
+            while sm.rounds < 2 and time.time() < deadline:
+                time.sleep(0.02)
+            t_dec = time.time()
+            SC.trade_step(st, [fake_row(m, 1.0) for m in ("A", "B")], ds, later, {}, None, sm, t_dec)
+        bought = [s for s in st.sigs() if s["rule"] == "unpushed_liquid" and s["in_ts"] > later]
+        self.assertTrue(bought)
+        a = next(s for s in bought if s["mint"] == "A")
+        self.assertEqual((a["in_ts"], a["in_price"]), (t_dec, 1.3))         # not the scan's 1.0
+        self.assertLessEqual(a["f"]["lag"], C.FAST["fill_lag_s"])
         page = SC.trade_page(st, pol, feats, [fake_row(m, 1.0) for m in ("A", "B")], now, None, {}, None, minute)
         q = page["quick"]
         self.assertEqual(q["n_trades"], len(quick))

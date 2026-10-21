@@ -214,9 +214,10 @@ rarely block a coin on their own.
 ## Buy & sell: rules that have to earn a signal
 
 The Buy & sell tab is a paper ledger, not advice. Every scan, each coin that passes every gate is checked against a
-bench of entry rules (`ENTRY_POOL` in the config, `undertow/trade.py`). A rule that fires opens a paper trade at that
-scan's price; every later price reading steps the trade through every exit policy on the bench (`EXIT_POOL`), so one
-entry has a result under each way of selling it. Results are after a 1% fee allowance a side plus price impact on a
+bench of entry rules (`ENTRY_POOL` in the config, `undertow/trade.py`). A rule that fires opens a paper trade once the
+scan's gates are known, at the coin's latest minute price (the scan's own price reading is 10 to 15 minutes older
+than the gates the decision relied on); every later price reading steps the trade through every exit policy on the
+bench (`EXIT_POOL`), so one entry has a result under each way of selling it. Results are after a 1% fee allowance a side plus price impact on a
 $500 position (`TRADE` in the config). Each scan reads prices three ways, in time order: its own reading of every
 price, which steps every open trade at once; one reading a minute while it works out the gates (next section), which
 steps them again; and, once the gates are known, the scan's decisions (a structure gate failed, an exit model says
@@ -491,10 +492,11 @@ the page shows when the last scan ran and warns when one is overdue.
   minutes with no reading, and coins outside the watch list (240 at most) are priced at scans only. Real fills add slippage on fast moves, priority fees and failed transactions, and a
   public signal can move a thin pool before you act on it. A live rule's record is evidence about the past, not a
   promise about its next trade.
-* **A scan rule's entry price comes first.** A rule that fires at a scan buys at that scan's price reading, a few
-  minutes before the gates it relied on were finished (they read data from the whole run). That keeps the forward
-  record comparable with the backtests and the models, which enter the same way; quick rules avoid it by reading only
-  the previous scan's gates.
+* **Entry prices before 21 October 2026, about 20:00 UTC.** Until the minute data existed, a rule that fired at a scan bought
+  at that scan's price reading, 10 to 15 minutes before the gates it relied on were finished, a price nobody could
+  have had once the signal existed. Since then it buys at decision time at the latest minute price; trades opened
+  before then keep their old entry prices. The backtests on the stored path and the models' training labels still
+  enter at a scan's reading, which is one more reason only the forward record can promote a rule.
 * **Minute data is short.** The minute readings start on 21 October 2026 and are kept 24 hours; quick rules need weeks
   of forward trades before any can go live, and over minutes the round-trip cost (a median 2.2% a side at $500 in the
   study) is large against typical moves.

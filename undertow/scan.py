@@ -1351,8 +1351,17 @@ def trade_step(st, rows, ds_all, now, regime, bank=None, sampler=None, t_dec=Non
         start_all = quick_start(exits, loaded_x)
         start_model = sorted({policy["exit"] if policy["exit"] in exits else C.DEFAULT_EXIT} | loaded_x)
         busy, held = st.busy_rules(now, cfg["reentry_h"]), st.live_open_mints()
+        # a scan's buy fills at decision time, at the coin's latest minute price: the scan's own price reading is
+        # minutes older than the gates the decision relied on, so buying at it would use a price nobody could have had
+        # once the signal existed. Without a minute price from the last fill_lag_s seconds, the scan's reading it is.
+        last_tick = {t["mint"]: t for t in (sampler.ticks if sampler is not None else ())}
         for mint, f in feats.items():
             d = by[mint]["d"]
+            t = last_tick.get(mint)
+            if t and t.get("price") and t_dec - t["ts"] <= C.FAST["fill_lag_s"]:
+                fill = (t_dec, t["price"], t.get("liq"), t.get("mc") or d.get("mcap"), round(t_dec - t["ts"]))
+            else:
+                fill = (now, d["price"], d.get("liq"), d.get("mcap"), round(t_dec - now))
             for rule in policy["rules"]:
                 if rule["status"] not in ("testing", "live") or rule.get("fast") or (rule["id"], mint) in busy:
                     continue
@@ -1361,11 +1370,12 @@ def trade_step(st, rows, ds_all, now, regime, bank=None, sampler=None, t_dec=Non
                     continue
                 live = rule["status"] == "live" and mint not in held
                 keep = {k: f.get(k) for k in TRD.SHOWN_AT_ENTRY + [c[0] for c in rule["all"]] if f.get(k) is not None}
+                keep["lag"] = fill[4]          # seconds between the price bought at and the decision
                 if mid:                        # what the model saw: its score, its threshold, when it was trained
                     meta = (bank.entry.get(mid) or ({},))[0]
                     keep.update(sc=LAB._r(picks[mid][mint]), thr=LAB._r(meta.get("thr")), mv=round(bank.summary["trained_at"]))
-                st.add_sig(rule["id"], mint, d.get("symbol") or by[mint]["t"]["symbol"], now, d["price"], d.get("liq"),
-                           d.get("mcap"), keep, policy["exit"], live, TRD.start_states(d["price"], start_model if mid else start_all))
+                st.add_sig(rule["id"], mint, d.get("symbol") or by[mint]["t"]["symbol"], fill[0], fill[1], fill[2],
+                           fill[3], keep, policy["exit"], live, TRD.start_states(fill[1], start_model if mid else start_all))
                 opened += 1
                 if live:
                     held.add(mint)
@@ -1718,8 +1728,9 @@ def run(args):
     log(f"lab: {n_obs} observations recorded, {n_up} open ones updated")
     policy, gmeta, changes = weekly_review(st, rows, now, policy)
     policy = add_attention_candidates(st, policy, now)
+    t_dec = time.time()                        # the gates are known: the ledger acts and buys at this moment
     tpolicy, tfeats, tchanges, picks, sells, minute, closed_dec = trade_step(st, rows, ds_all, now, regime, bank, sampler,
-                                                                             time.time())
+                                                                             t_dec)
     train_request(st, bank, now, os.path.dirname(os.path.abspath(args.db)))
     rate = base_rug_rate(st, now)
     community = COM.sync(rows, ds_all, now, rate) if COM.enabled() else "off: no SUPABASE_SECRET_KEY"
@@ -1748,7 +1759,7 @@ def run(args):
     st.close()
     notify.send(events)
     notify.review(changes)
-    notify.trade(tchanges, tpage, now)
+    notify.trade(tchanges, tpage, now, t_dec)
     notify.closes(closed_dec)
     return doc
 

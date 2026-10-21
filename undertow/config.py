@@ -535,9 +535,10 @@ ML_STUDY = {
 # bought. Quick rules trade only pools holding min_liq dollars or more: at $500 a side, a round trip costs about 4.6%
 # at $75k (fees plus price impact), so a +5% target barely breaks even there and loses below it (at $20k a +10% target
 # still loses 2%). Quick exits are compared on quick trades against baseline_exit. Minute readings are kept keep_h
-# hours, feed entries feed_keep_days days.
+# hours, feed entries feed_keep_days days. A scan rule's buy fills at the scan's decision time at the coin's latest
+# minute price, if that price is no more than fill_lag_s seconds old (else at the scan's own reading).
 FAST = {"every_s": 60, "slow_every": 2, "max_coins": 240, "watch_recent_h": 2, "keep_h": 24, "feed_keep_days": 7,
-        "stale_scan_min": 45, "reentry_min": 30, "baseline_exit": "q5_sl5_1h", "min_liq": 75_000}
+        "stale_scan_min": 45, "reentry_min": 30, "baseline_exit": "q5_sl5_1h", "min_liq": 75_000, "fill_lag_s": 180}
 
 
 def _quick(rid, label, exit_id, *conds, random=None):

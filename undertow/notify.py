@@ -34,12 +34,13 @@ def review(changes):
            if c["what"] != "testing"])
 
 
-def trade(changes, page, now):
-    """Live paper trades opened by this scan, and the trade review's changes (a rule going live or retiring, the exit
-    switching). Rules still under test never alert. Sales alert as they happen (closes, minute)."""
+def trade(changes, page, now, at=None):
+    """Live paper trades opened by this scan (at its decision time `at`, or at its own time), and the trade review's
+    changes (a rule going live or retiring, the exit switching). Rules still under test never alert. Sales alert as
+    they happen (closes, minute)."""
     page = page or {}
     out = []
-    fresh = [x for x in page.get("open") or [] if abs(x["in_ts"] - now) < 1]
+    fresh = [x for x in page.get("open") or [] if abs(x["in_ts"] - now) < 1 or (at and abs(x["in_ts"] - at) < 1)]
     if len(fresh) > 5:                    # one message rather than a burst when a live rule matches many coins at once
         out.append(f"UNDERTOW · {len(fresh)} buy signals (paper) this scan: " + ", ".join(x["sym"] or x["mint"][:6] for x in fresh[:30])
                    + f"\nExit: {page.get('exit', {}).get('label', '')}\nA rule's paper record, not a recommendation.")
