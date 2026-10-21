@@ -51,7 +51,8 @@ def main():
     log(f"label: {pol['id']} ({MOD.TRD.exit_label(pol)})")
     s = MOD.train_all(path, pol, C.TRADE, C.MODELS, C.MODEL_SETS, a.dir, now, log)
     ok = [m for m in s.get("entry") or [] if not m.get("error")]
-    log(f"done: {s.get('status')}; {len(ok)} entry models, {len(s.get('exit') or [])} exit models in {s.get('seconds')}s")
+    log(f"done: {s.get('status')}; {len(ok)} entry models, {len(s.get('exit') or [])} exit models"
+        + (f" in {s['seconds']}s" if s.get("seconds") is not None else ""))
     bad = [m["id"] + ": " + m["error"] for m in (s.get("entry") or []) + (s.get("exit") or []) if m.get("error")]
     for b in bad:
         log("failed:", b)
