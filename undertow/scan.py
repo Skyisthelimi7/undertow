@@ -1231,7 +1231,7 @@ def trade_step(st, rows, ds_all, now, regime, bank=None):
     return policy, feats, changes, picks, sells
 
 
-def trade_page(st, policy, feats, rows, now, exit_pool=None, picks=None):
+def trade_page(st, policy, feats, rows, now, exit_pool=None, picks=None, sigs=None):
     """What the Buy & sell tab shows. Open trades carry their exit levels so the page can flag a sell between scans."""
     if not policy:
         return None
@@ -1240,7 +1240,7 @@ def trade_page(st, policy, feats, rows, now, exit_pool=None, picks=None):
     if policy["exit"] not in exits:            # a live exit model whose models are missing this scan
         policy = {**policy, "exit": C.DEFAULT_EXIT}
     by = {r["t"]["mint"]: r for r in rows}
-    sigs = st.sigs(now - cfg["window_days"] * 86400)
+    sigs = sigs if sigs is not None else st.sigs(now - cfg["window_days"] * 86400)
     live_ids = [r["id"] for r in policy["rules"] if r["status"] == "live"]
     rules = {r["id"]: r for r in policy["rules"]}
 
@@ -1354,7 +1354,7 @@ EXIT_KEYS = ("id", "slug", "algo", "family", "n_vars", "decisions", "auc", "trai
              "trades", "net", "base_net", "gain", "gain_t", "early", "thr", "leading", "seconds", "error")
 
 
-def models_page(st, bank, policy, tpage, now, picks, sells):
+def models_page(st, bank, policy, tpage, now, picks, sells, sigs=None):
     """What the Models tab shows: every model's walk-forward test, its forward paper record under the live exit, the
     exit models against the live exit on the same trades, and every model trade with its coin and time."""
     S = (bank.summary if bank else None) or {}
@@ -1373,7 +1373,8 @@ def models_page(st, bank, policy, tpage, now, picks, sells):
     exits = {e["id"]: e for e in exit_pool_of(bank)}
     live_exit = exits.get((policy or {}).get("exit")) or exits[C.DEFAULT_EXIT]
     rules = {r["id"]: r for r in (policy or {}).get("rules") or []}
-    sigs = [s for s in st.sigs(now - cfg["window_days"] * 86400) if s["rule"].startswith("m:")]
+    every = sigs if sigs is not None else st.sigs(now - cfg["window_days"] * 86400)
+    sigs = [s for s in every if s["rule"].startswith("m:")]
     by_rule = defaultdict(list)
     for s in sigs:
         by_rule[s["rule"]].append(s)
@@ -1417,7 +1418,7 @@ def models_page(st, bank, policy, tpage, now, picks, sells):
         log_rows.append(row)
     # every sale an exit model made, on any paper trade (rules' and models'), against the live exit on the same trade
     xlog = []
-    for s in st.sigs(now - cfg["window_days"] * 86400):
+    for s in every:
         for pid, v in (s["out"] or {}).items():
             if pid.startswith("x:") and v[2] == "model said sell":
                 ref = (s["out"] or {}).get(live_exit["id"])
@@ -1502,9 +1503,10 @@ def run(args):
     meta["call_base_rate"] = round(COM.base_rate(rate), 4)       # what rug calls are scored against (see community.py)
     meta["call_base_rate_measured"] = rate is not None             # False: the default, until a fortnight has settled
     meta["community"] = community
-    tpage = trade_page(st, tpolicy, tfeats, rows, now, exit_pool_of(bank), picks)
+    sigs = st.sigs(now - C.TRADE["window_days"] * 86400)          # read once for both tabs
+    tpage = trade_page(st, tpolicy, tfeats, rows, now, exit_pool_of(bank), picks, sigs)
     meta["trade"] = tpage
-    meta["models"] = models_page(st, bank, tpolicy, tpage, now, picks, sells)
+    meta["models"] = models_page(st, bank, tpolicy, tpage, now, picks, sells, sigs)
     meta["corr"] = corr_page(st, now)
     doc = export(st, rows, handles, now, meta, args.out)
     write_csv(os.path.join(os.path.dirname(os.path.abspath(args.out)), "tracker.csv"), tracker_rows(st, rows, now))

@@ -389,7 +389,7 @@ def train_all(path, pol, cfg_trade, cfg, sets, out_dir, now=None, log=print):
         p = oos[m]
         rec = {"id": mid, "slug": slug, "algo": dict((s, n) for s, n, _k in ALGOS).get(slug, "Random scores (control)"),
                "family": FAMILY.get(slug), "kind": kind, "set": set_name, "n_vars": len(keys) if keys else 0,
-               "n_test": int(m.sum()), "auc": auc(y[m], p), "auc_sd": float(np.std(fold_auc)) if fold_auc else None,
+               "n_test": int(m.sum()), "auc": auc(y[m], p), "auc_sd": float(np.std(fold_auc)) if len(fold_auc) > 1 else None,
                "train_auc": float(np.mean(tr_auc)) if tr_auc else None}
         rec["gap"] = rec["train_auc"] - rec["auc"] if rec["train_auc"] is not None and rec["auc"] is not None else None
         if kind in ("cls", "seq", "random"):
