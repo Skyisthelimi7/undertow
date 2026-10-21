@@ -492,11 +492,11 @@ the page shows when the last scan ran and warns when one is overdue.
   minutes with no reading, and coins outside the watch list (240 at most) are priced at scans only. Real fills add slippage on fast moves, priority fees and failed transactions, and a
   public signal can move a thin pool before you act on it. A live rule's record is evidence about the past, not a
   promise about its next trade.
-* **Entry prices before 21 October 2026, about 20:00 UTC.** Until the minute data existed, a rule that fired at a scan bought
-  at that scan's price reading, 10 to 15 minutes before the gates it relied on were finished, a price nobody could
-  have had once the signal existed. Since then it buys at decision time at the latest minute price; trades opened
-  before then keep their old entry prices. The backtests on the stored path and the models' training labels still
-  enter at a scan's reading, which is one more reason only the forward record can promote a rule.
+* **Entry prices before 21 October 2026, about 20:00 UTC.** Until the minute data existed, a rule that fired at a scan
+  bought at that scan's price reading, 10 to 15 minutes before the gates it relied on were finished, a price nobody
+  could have had once the signal existed. Since then it buys at decision time at the latest minute price; trades
+  opened before then keep their old entry prices. The backtests on the stored path and the models' training labels
+  still enter at a scan's reading, which is one more reason only the forward record can promote a rule.
 * **Minute data is short.** The minute readings start on 21 October 2026 and are kept 24 hours; quick rules need weeks
   of forward trades before any can go live, and over minutes the round-trip cost (a median 2.2% a side at $500 in the
   study) is large against typical moves.
