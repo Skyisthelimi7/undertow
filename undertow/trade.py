@@ -19,7 +19,7 @@ The weekly review reads those records:
 """
 import math, time
 from collections import defaultdict
-from . import lab as LAB
+from . import lab as LAB, attention as ATT
 
 H = 3600
 OPS = {">=": lambda a, b: a >= b, ">": lambda a, b: a > b, "<=": lambda a, b: a <= b, "<": lambda a, b: a < b}
@@ -39,7 +39,8 @@ PATH_VARS = [
 ]
 LAB_KEYS = ("c5m", "c1h", "c6h", "c24h", "v5m", "v1h", "v6h", "v24h", "v1h_24", "v6h_24", "bs1h", "bs24h", "nf1h",
             "nf1h_liq", "nf6h", "nf24h", "ss1h", "tr1h", "brd1h", "hold", "hc1h", "hc24h", "liqc1h", "volc1h", "org",
-            "top10", "exit", "rf", "age", "mc", "liq", "liq_pct", "lfdv", "turn", "dd24s", "mkt1h", "sol24", "mom")
+            "top10", "exit", "rf", "age", "mc", "liq", "liq_pct", "lfdv", "turn", "dd24s", "mkt1h", "sol24", "mom",
+            "tgm", "tgr") + tuple(ATT.KEYS)          # attention (attention.py), from the scan it started being recorded
 _LAB_DEFS = {k: (k, l, u) for k, l, u in LAB.VARIABLES}
 VARIABLES = PATH_VARS + [_LAB_DEFS[k] for k in LAB_KEYS if k in _LAB_DEFS]
 VAR_KEYS = [v[0] for v in VARIABLES]
@@ -94,7 +95,10 @@ def decision_features(lab_f, path_f):
 
 # ---------------------------------------------------------------- rules
 def fires(rule, f):
-    """True when every condition of the rule holds on f. A missing value never satisfies a condition."""
+    """True when every condition of the rule holds on f. A missing value never satisfies a condition. A model's rule
+    has no conditions: it fires on its model's score (scan.py), never here."""
+    if rule.get("model"):
+        return False
     for key, op, at in rule["all"]:
         v = (f or {}).get(key)
         if isinstance(v, bool) or not isinstance(v, (int, float)) or not OPS[op](v, at):
@@ -131,7 +135,7 @@ def net_ret(x, liq_in, liq_out, cfg):
 
 def exit_label(p):
     """Plain words for an exit policy."""
-    parts = []
+    parts = [f"sell when the {p.get('algo', p['model'])} exit model says selling now beats holding"] if p.get("model") else []
     if p.get("tp") is not None:
         parts.append(f"take profit at +{p['tp']:g}%")
     if p.get("trail") is not None:
@@ -150,10 +154,11 @@ def new_state(price):
     return {"peak": price, "prev": price}
 
 
-def step(pol, pos, st, price, liq, c1h, now, cfg, guard=None):
+def step(pol, pos, st, price, liq, c1h, now, cfg, guard=None, sell=False):
     """One scan for one open trade under one exit policy. pos: in_ts, in_price, in_liq. st: {peak, prev}, updated in
-    place. guard: a reason to sell at once whatever the policy says. Returns None to hold, or (net %, hours held,
-    reason, price)."""
+    place. guard: a reason to sell at once whatever the policy says. sell: an exit model's call to sell now (for a
+    policy with a model; its target and time limit still apply). Returns None to hold, or (net %, hours held, reason,
+    price)."""
     x = price / pos["in_price"]
     st["peak"] = max(st["peak"], price)
     peak_x = st["peak"] / pos["in_price"]
@@ -171,6 +176,8 @@ def step(pol, pos, st, price, liq, c1h, now, cfg, guard=None):
             why = "cooled off"
         elif pol.get("fade") is not None and held >= 1 and c1h is not None and c1h <= -pol["fade"]:
             why = "fading"
+        elif sell and pol.get("model"):
+            why = "model said sell"
         elif held >= pol.get("max_h", 24) - 0.01:
             why = "time"
     st["prev"] = price
@@ -216,8 +223,9 @@ def start_states(price, policies):
 def advance(sig, obs, now, policies, cfg):
     """Step one paper trade through each exit policy still undecided for it, with this scan's reading of its coin.
     sig: in_ts, in_price, in_liq, out {policy: [net, hours, reason, ts, price]}, st {policy: {peak, prev}} (one entry
-    per undecided policy), miss, last_price, last_liq. obs: {price, liq, c1h, hard} or None when nothing prices the
-    coin this scan. A policy no longer on the bench is dropped. Returns (out, st, miss, last_price, last_liq, done)."""
+    per undecided policy), miss, last_price, last_liq. obs: {price, liq, c1h, hard, xm} or None when nothing prices
+    the coin this scan; xm: {policy: True} where an exit model says sell this trade now. A policy no longer on the
+    bench is dropped. Returns (out, st, miss, last_price, last_liq, done)."""
     out, st = dict(sig.get("out") or {}), {k: dict(v) for k, v in (sig.get("st") or {}).items()}
     miss, lp, ll = sig.get("miss") or 0, sig.get("last_price") or sig["in_price"], sig.get("last_liq") or sig["in_liq"]
     guard = guard_for(obs if obs and obs.get("price") else None, sig, cfg)
@@ -230,12 +238,13 @@ def advance(sig, obs, now, policies, cfg):
         miss, price, liq, c1h = 0, obs["price"], obs.get("liq"), obs.get("c1h")
         lp, ll = price, liq if liq is not None else ll
     pos = {"in_ts": sig["in_ts"], "in_price": sig["in_price"], "in_liq": sig["in_liq"]}
+    xm = (obs or {}).get("xm") or {}
     for pid in list(st):
         pol = policies.get(pid)
         if pol is None:
             st.pop(pid)
             continue
-        r = step(pol, pos, st[pid], price, liq, c1h, now, cfg, guard)
+        r = step(pol, pos, st[pid], price, liq, c1h, now, cfg, guard, bool(xm.get(pid)))
         if r:
             out[pid] = [LAB._r(r[0]), round(r[1], 2), r[2], now, LAB._r(r[3])]
             st.pop(pid)
@@ -528,7 +537,7 @@ def run_review(policy, path, fwd_by_rule, now, cfg, entry_pool, exit_pool, defau
         fw = [{"mint": t["mint"], "in_ts": t["in_ts"], "ret": t["out"].get(policy["exit"]), "h": None}
               for t in fwd_by_rule.get(r["id"], []) if t["in_ts"] >= (since or 0) and matured(t["in_ts"], live_exit, now)]
         fw = [t for t in fw if t["ret"] is not None]
-        bt = backtest(path, r, live_exit, cfg)
+        bt = [] if r.get("model") else backtest(path, r, live_exit, cfg)     # a model is judged forward only
         fs, bs = summarise(fw), summarise(bt)
         h1, h2 = halves(bt)
         verdict, why = judge_rule(fs, bs, cfg, live=r["status"] == "live")
@@ -581,7 +590,7 @@ def run_review(policy, path, fwd_by_rule, now, cfg, entry_pool, exit_pool, defau
 
     # 4. keep the bench full: the pool first, then rules from variables with a signal, then retired rules due a retest
     have = {r["id"] for r in policy["rules"]}
-    testing = sum(1 for r in policy["rules"] if r["status"] == "testing")
+    testing = sum(1 for r in policy["rules"] if r["status"] == "testing" and not r.get("model"))   # models have their own bench
     room = min(cfg["add_per_review"], max(0, cfg["testing"] - testing)) if policy["last_review"] else cfg["testing"]
     for rule in list(entry_pool) + suggest_rules(var_recs, have, cfg):
         if room <= 0:
@@ -648,6 +657,28 @@ def backtest_entries(path, rules, exits, cfg):
                     e["out"][pid] = res[0]
                     break
     return [e for e in out if e["out"]]
+
+
+def add_rules(policy, rules, now, source):
+    """Put rules on the bench at once, between weekly reviews: rules on variables that have only just started being
+    recorded, and the models' rules, so their forward records start now rather than at the next review. A rule whose
+    variables are not all known to the bench is skipped. Returns the changes, which also go to the policy's log."""
+    have = {r["id"] for r in policy["rules"]}
+    changes = []
+    for rule in rules:
+        if rule["id"] in have or any(k not in VAR_KEYS for k, _o, _a in rule.get("all") or []):
+            continue
+        src = rule.get("source") if rule.get("source") not in (None, "pool") else source
+        r = {**rule, "status": "testing", "added": now, "since": now, "source": src,
+             "last": {"ts": now, "verdict": "collecting", "fwd": {"n": 0}, "bt": {"n": 0},
+                      "why": "forward: no settled trades yet; backtest: none (" + ("judged forward only" if rule.get("model")
+                                                                                  else "its variables are new") + ")"}}
+        policy["rules"].append(r)
+        have.add(r["id"])
+        changes.append({"ts": now, "what": "testing", "id": r["id"], "label": r["label"],
+                        "reason": f"Added for testing on {_day(now)} ({src})."})
+    policy["log"] = ((policy.get("log") or []) + changes)[-200:]
+    return changes
 
 
 def due(policy, now, cfg):

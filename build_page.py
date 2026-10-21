@@ -1,4 +1,5 @@
-"""Assemble the page from web/style.*.css, web/body.html, web/app.js and web/trade.* (the Buy & sell tab), plus
+"""Assemble the page from web/style.*.css, web/body.html, web/app.js, web/trade.* (the Buy & sell tab), web/corr.js
+and web/models.* (the Correlations and Models tabs), plus
 web/community.* (rug calls, votes and tags through Supabase) in every build except --fragment.
 
     python3 build_page.py OUT.html                     loads data.json (and snap/, the CSVs) from its own folder
@@ -24,8 +25,10 @@ GUARD = ("<script>setTimeout(function(){if(!window.__undertow){var s=document.ge
 
 
 def build(out_path, embed=None, fragment=False, split=False):
-    css = (W / "style.base.css").read_text() + (W / "style.extra.css").read_text() + (W / "trade.css").read_text()
-    js = (W / "app.js").read_text() + "\n" + (W / "trade.js").read_text()     # the Buy & sell tab, in every build
+    css = (W / "style.base.css").read_text() + (W / "style.extra.css").read_text() + (W / "trade.css").read_text() \
+        + (W / "models.css").read_text()
+    # the Buy & sell, Correlations and Models tabs, in every build
+    js = "\n".join((W / f).read_text() for f in ("app.js", "trade.js", "corr.js", "models.js"))
     if not fragment:                                  # rug calls and votes need Supabase, which claude.ai would block
         css += (W / "community.css").read_text()
         js += "\n" + (W / "community.js").read_text()

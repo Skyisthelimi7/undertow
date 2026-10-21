@@ -78,7 +78,7 @@ function kpi(k,v,s){return '<div class="kpi"><div class="k">'+k+'</div><div clas
 /* the testing rules with the best record so far: the forward record once it has 10 matured trades, else the backtest */
 function leaders(n){
   var score=function(r){var f=r.fwd_now||{},b=(r.last||{}).bt||{};return f.n>=10?f.mean:(b.n?b.mean:null);};
-  return (T.bench||[]).filter(function(r){return r.status==='testing'&&score(r)!=null;}).sort(function(a,b){return score(b)-score(a);}).slice(0,n);
+  return (T.bench||[]).filter(function(r){return r.status==='testing'&&!r.model&&score(r)!=null;}).sort(function(a,b){return score(b)-score(a);}).slice(0,n);
 }
 function buySec(){
   var c=T.cfg||{},size=U.posSize()||500,e=(T.exit||{}).params||{};
@@ -135,15 +135,17 @@ function recordSec(){
 }
 
 function benchSec(){
-  var b=(T.bench||[]).filter(function(r){return r.status!=='retired';}).sort(function(x,y){return (y.status==='live')-(x.status==='live')||(((y.fwd_now||{}).mean||((y.last||{}).bt||{}).mean||-99)-((x.fwd_now||{}).mean||((x.last||{}).bt||{}).mean||-99));});
-  var gone=(T.bench||[]).filter(function(r){return r.status==='retired';}),c=T.cfg||{};
+  var nm=(T.bench||[]).filter(function(r){return r.model&&r.status!=='retired';}).length;
+  var b=(T.bench||[]).filter(function(r){return r.status!=='retired'&&(!r.model||r.status==='live');}).sort(function(x,y){return (y.status==='live')-(x.status==='live')||(((y.fwd_now||{}).mean||((y.last||{}).bt||{}).mean||-99)-((x.fwd_now||{}).mean||((x.last||{}).bt||{}).mean||-99));});
+  var gone=(T.bench||[]).filter(function(r){return r.status==='retired'&&!r.model;}),c=T.cfg||{};
   var rows=b.map(function(r){var l=r.last||{},f=r.fwd_now||{},bt=l.bt||{},hv=l.bt_halves||[];
     return '<tr><td class="l"><span title="'+esc(conds(r))+'">'+esc(r.label)+'</span><br><span class="nm">'+conds(r)+'</span></td><td class="l">'+stChip(r.status)+'</td>'
       +'<td>'+int(f.n||0)+(r.open?' <span class="nm">+'+r.open+' open</span>':'')+'</td><td>'+(f.n?pc(f.win*100,0):'–')+'</td><td>'+(f.n?n1(f.mean)+tval(f.t):'–')+'</td>'
       +'<td>'+(bt.n?int(bt.n)+' · '+n1(bt.mean):'–')+(hv[0]&&hv[1]&&hv[0].n&&hv[1].n?'<br><span class="nm">halves '+n1(hv[0].mean)+' / '+n1(hv[1].mean)+'</span>':'')+'</td>'
       +'<td class="l">'+vchip(l.verdict)+'</td><td class="l">'+esc(ymd(r.status==='live'?r.since:r.added))+(r.source&&r.source!=='pool'?' <span class="nm">'+esc(r.source)+'</span>':'')+'</td></tr>';});
   var body='<p class="trk-note">Forward: trades opened since the rule joined the bench (or went live), under the live exit, after costs. Backtest: the same rule on the last '+(c.path_days||14)+' days of the path the scanner keeps; it ranks rules, but only the forward record can promote one. A rule is retired after '+c.retire_after+' reviews in a row of losing, or when it fires too rarely to judge, and the next one from the pool, or one built from a variable that shows a signal, takes its place.</p>'
-    +table(['Rule','<Status','Forward trades','Made money','Average after costs','Backtest: trades · average','<Verdict','<Since'],rows);
+    +table(['Rule','<Status','Forward trades','Made money','Average after costs','Backtest: trades · average','<Verdict','<Since'],rows)
+    +(nm?'<p class="fine">'+nm+' machine-learning models are on the same bench, judged on the same bar; their records are on the <button type="button" class="linkbtn" id="tr-models-go">Models tab</button>. A model that earns a live signal shows above with the rules.</p>':'');
   if(gone.length)body+='<details class="rv-gone"><summary>Retired rules ('+gone.length+')</summary><ul class="rv-log">'+gone.map(function(r){return '<li><b>'+esc(r.label)+'</b>: '+esc(r.reason||'')+'</li>';}).join('')+'</ul></details>';
   return sec('Rules under test',body,'tr-bench');
 }
@@ -151,7 +153,7 @@ function benchSec(){
 function exitSec(){
   var ex=(T.exits||[]).slice().sort(function(a,b){return (b.live-a.live)||((((b.now||{}).mean)||-99)-(((a.now||{}).mean)||-99));}),c=T.cfg||{};
   var rows=ex.map(function(e){var n=e.now||{},l=e.last||{};
-    return '<tr'+(e.live?' class="holdrow"':'')+'><td class="l">'+esc(e.label)+(e.live?' <span class="pill in">Live</span>':'')+'</td><td>'+(n.n?int(n.n):'–')+'</td><td>'+(n.n?pc(n.win*100,0):'–')+'</td><td>'+(n.n?n1(n.mean):'–')+'</td><td>'+(e.live||!n.n||n.gain==null?'–':n1(n.gain).replace('%',' pts')+tval(n.t))+'</td><td>'+(l.n>=10?int(l.n)+' '+esc(l.basis||'')+': '+n1(l.mean):'–')+'</td></tr>';});
+    return '<tr'+(e.live?' class="holdrow"':'')+'><td class="l">'+esc(e.label)+(e.live?' <span class="pill in">Live</span>':'')+(e.model?' <span class="nm">exit model</span>':'')+'</td><td>'+(n.n?int(n.n):'–')+'</td><td>'+(n.n?pc(n.win*100,0):'–')+'</td><td>'+(n.n?n1(n.mean):'–')+'</td><td>'+(e.live||!n.n||n.gain==null?'–':n1(n.gain).replace('%',' pts')+tval(n.t))+'</td><td>'+(l.n>=10?int(l.n)+' '+esc(l.basis||'')+': '+n1(l.mean):'–')+'</td></tr>';});
   var none=!ex.some(function(e){return (e.now||{}).n;});
   return sec('Exit policies compared',(ex.some(function(e){return e.reason;})?'<p class="trk-note">'+esc(ex.filter(function(e){return e.reason;}).map(function(e){return e.reason;}).join(' '))+'</p>':'')
     +(none?'<p class="trk-note"><b>Collecting.</b> A policy is compared once trades have had time to close under it and under the live one, up to 25 hours for the slowest.</p>':'')
@@ -191,6 +193,7 @@ function render(){
   var y=window.scrollY;
   w.innerHTML=head()+buySec()+openSec()+warnSec()+recordSec()+benchSec()+exitSec()+varSec()+studySec()+logSec();
   $$('[data-tk]',w).forEach(function(b){b.onclick=function(){U.open(b.dataset.tk);};});
+  var mg=$('#tr-models-go',w);if(mg)mg.onclick=function(){U.setView('models');};
   /* card tables stack into labelled rows on a phone: each cell carries its column's name */
   $$('table.cards',w).forEach(function(t){var hs=$$('thead th',t).map(function(th){return th.textContent;});
     $$('tbody tr',t).forEach(function(tr){$$('td',tr).forEach(function(td,i){td.setAttribute('data-label',hs[i]||'');

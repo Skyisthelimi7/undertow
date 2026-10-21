@@ -1,0 +1,10 @@
+# The Models tab only: the training job (undertow/train.py) and the scan's scoring. The scanner itself needs none of
+# these. Pinned, because a model is saved by one job and loaded by another, and a pickled model only loads into the
+# library version that wrote it.
+numpy==2.5.3
+scipy==1.18.1
+scikit-learn==1.9.1
+joblib==1.6.0
+threadpoolctl==3.7.0
+xgboost-cpu==3.4.1
+lightgbm==4.7.0

@@ -52,7 +52,10 @@ TSNAP_COLS = ("ts", "mint", "ev", "h", "state", "fails", "price", "x") + TSNAP_V
 ADDED = [("trk_json", "TEXT"), ("entries_n", "INTEGER DEFAULT 0"), ("last_exit_ts", "REAL"), ("exit_json", "TEXT"),
          ("exit_ts", "REAL"), ("live_price", "REAL"), ("live_mcap", "REAL"), ("live_ts", "REAL"),
          ("entry_json", "TEXT"), ("candles_ts", "REAL"), ("rpc_json", "TEXT"), ("rpc_ts", "REAL"),
-         ("lock_json", "TEXT"), ("lock_ts", "REAL"), ("gp_json", "TEXT"), ("gp_ts", "REAL")]
+         ("lock_json", "TEXT"), ("lock_ts", "REAL"), ("gp_json", "TEXT"), ("gp_ts", "REAL"),
+         # attention (see attention.py): the hourly history of boosts, trending ranks, X followers and Telegram
+         # members, and the latest DEX Screener orders, X profile and website domain readings
+         ("attn_json", "TEXT")]
 SETTABLE = {c for c, _ in ADDED}
 
 
@@ -286,9 +289,25 @@ class Store:
         q = """SELECT rule, mint FROM tsig WHERE ref_out_ts IS NULL OR in_ts>?"""
         return {(r[0], r[1]) for r in self.db.execute(q, (now - reentry_h * 3600,))}
 
-    def prune_sigs(self, before):
-        """Settled paper trades of rules that were not live when they opened, once older than `before`."""
+    def prune_sigs(self, before, models_before=None):
+        """Settled paper trades of rules that were not live when they opened, once older than `before`; the models'
+        (many more of them) once older than `models_before`."""
         self.db.execute("DELETE FROM tsig WHERE in_ts<? AND live=0 AND done=1", (before,))
+        if models_before:
+            self.db.execute("DELETE FROM tsig WHERE in_ts<? AND live=0 AND done=1 AND rule LIKE 'm:%'", (models_before,))
+
+    def prune_attention(self, before):
+        """Drop the attention records of coins last read before `before` (no longer candidates), keeping each record's
+        website reading, which does not go stale. Returns how many were thinned."""
+        n = 0
+        for r in self.db.execute("SELECT mint, attn_json FROM tokens WHERE attn_json IS NOT NULL").fetchall():
+            a = json.loads(r[1])
+            last = max([(a.get("hist") or [[0]])[-1][0]] + [(a.get(k) or {}).get("ts") or 0 for k in ("orders", "x")])
+            if last < before and (a.get("hist") or a.get("orders") or a.get("x")):
+                keep = {"web": a["web"]} if a.get("web") else None
+                self.db.execute("UPDATE tokens SET attn_json=? WHERE mint=?", (json.dumps(keep) if keep else None, r[0]))
+                n += 1
+        return n
 
     def live_open_mints(self):
         return {r[0] for r in self.db.execute("SELECT DISTINCT mint FROM tsig WHERE live=1 AND ref_out_ts IS NULL")}

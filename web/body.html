@@ -22,6 +22,8 @@
       <button type="button" data-view="wait" aria-pressed="false">Waiting room</button>
       <button type="button" data-view="lab" aria-pressed="false">Lab</button>
       <button type="button" data-view="trade" aria-pressed="false">Buy &amp; sell</button>
+      <button type="button" data-view="corr" aria-pressed="false">Correlations</button>
+      <button type="button" data-view="models" aria-pressed="false">Models</button>
     </div>
     <div class="ctl" id="ctl-band">
       <span class="ctl-label" id="lbl-band">Size band</span>
@@ -78,6 +80,8 @@
       <div class="pane waitwrap" id="waitwrap" hidden></div>
       <div class="pane labwrap" id="labwrap" hidden></div>
       <div class="pane tradewrap" id="tradewrap" hidden></div>
+      <div class="pane corrwrap" id="corrwrap" hidden></div>
+      <div class="pane modelswrap" id="modelswrap" hidden></div>
       <div class="legend" id="legend"></div>
     </section>
     <aside class="xray" id="xray" aria-label="Token X-ray" hidden></aside>
@@ -95,7 +99,7 @@
   </details>
 
   <footer>
-    <p>Information only, not financial advice. The Buy &amp; sell tab records what rules would have done on paper after estimated costs; a rule’s record does not make its next trade safe, and passing every gate does not make a token safe: most memecoins still go to zero. The gates remove the obvious traps and the thinnest markets; they can't see off-chain deals, and the free data sources can lag or be wrong.</p>
+    <p>Information only, not financial advice. The Buy &amp; sell and Models tabs record what rules and models would have done on paper after estimated costs; a record does not make the next trade safe, and passing every gate does not make a token safe: most memecoins still go to zero. The gates remove the obvious traps and the thinnest markets; they can't see off-chain deals, and the free data sources can lag or be wrong.</p>
   </footer>
 </div>
 

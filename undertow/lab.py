@@ -8,6 +8,7 @@ separates risers from fallers, a suggested line found on the earlier half of the
 and a verdict that stays "collecting" until the sample is big enough to mean something.
 """
 import math
+from . import attention as ATT
 
 H = 3600
 
@@ -38,7 +39,7 @@ VARIABLES = [
     ("dd24s", "Price vs highest scan price in 24h", "frac"),
     ("tgm", "Telegram members", "n"), ("tgr", "Telegram bot-risk", "score"),
     ("sol24", "SOL price change, 24h","chg"), ("mkt1h", "Share of candidates rising, 1h", "share"),
-]
+] + ATT.VARIABLES                 # attention: boosts, ads, trending ranks, X followers, Telegram, website (attention.py)
 VAR_KEYS = [v[0] for v in VARIABLES]
 
 
@@ -90,6 +91,7 @@ def features(d, m, j, mq=None, mom=None, tg=None, regime=None):
         # categories, used to split results rather than ranked
         "lp": j.get("launchpad") or "direct", "kind": m.get("venue_kind"), "q": (mq or {}).get("label"),
     }
+    f.update({k: v for k, v in (m.get("attn") or {}).items() if k in ATT.KEYS})     # worked out by the scanner
     return {k: _r(v) for k, v in f.items() if v is not None}
 
 

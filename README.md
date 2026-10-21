@@ -7,8 +7,11 @@ float cap, a gate checklist and rug-risk panel per token, a demand and exit read
 ATH with an hourly snapshot of every tracked token, a Lab that scores which variables separate risers from fallers,
 and a waiting room for tokens that fall out. Every week it reviews its own gates against what happened next, drops
 the ones that make no difference, and tests new rules. Signed-in visitors can call rugs on a public scoreboard,
-vote and tag tokens; the crowd is shown beside the gates and never changes them. Everything runs on free data.
-Python 3.9+, standard library only.
+vote and tag tokens; the crowd is shown beside the gates and never changes them. A Buy & sell tab paper-trades entry
+rules and exit policies that have to earn a live signal; a Correlations tab measures how every variable moves with
+the price; a Models tab trains machine-learning entry and exit models every 6 hours, tests them walk-forward and then
+paper-trades them forward. Everything runs on free data. The scanner needs Python 3.9+ and the standard library only;
+the Models tab needs the pinned libraries in `requirements-ml.txt` (the scan carries on without them).
 
 ## Run it
 
@@ -16,6 +19,8 @@ Python 3.9+, standard library only.
     python3 build_page.py docs/index.html                                 # page that reads data.json beside it
     python3 build_page.py docs/index.html --embed docs/data.json          # ... or one file that also opens offline
     python3 -m undertow.scan inspect <MINT>                               # gate report for one token
+    pip install -r requirements-ml.txt                                    # only for the Models tab
+    python3 -m undertow.train --db undertow.db --dir state/models         # train and test the models (scan reads --models)
     python3 -m unittest discover -s tests
 
 A token needs `ENTER_SCANS` (2) clean scans in a row to enter, so the map is empty until the second run. A run
@@ -243,6 +248,73 @@ To use it: open **Buy & sell**. With no live rule, it shows what the leading rul
 warning state, and every rule's record. Telegram alerts (when set up) post live buy and sell signals and review
 changes; rules under test never alert.
 
+## Attention: the public stand-ins for visitor counts
+
+Visitor numbers for a project's website, its X account or its DEX Screener page are not published anywhere: only
+their owners see them. The scanner records what is public instead (`undertow/attention.py`, `ATTN` in the config):
+
+* **DEX Screener**: paid boosts running now (in every pair record, so every candidate, every scan) and boosts bought in
+  the last hour; from its orders endpoint, paid ads (and one in the last 3 hours), a paid profile and community
+  takeovers, every 3 hours; and how many links the coin's profile lists.
+* **Trending ranks, every scan**: GeckoTerminal's trending pools over 1 hour and 5 minutes (GeckoTerminal ranks them
+  partly on visits to its own pages, the nearest free stand-in for page views), whether a coin joined the 1-hour list
+  in the last hour, and Jupiter's trending lists over 1 and 6 hours.
+* **X followers** through fxtwitter's free public mirror (X's own API is paid): hourly for coins inside the screener,
+  every 3 hours for coins close to passing. Growth over 6 hours, and a spike measure: the last hour's growth minus the
+  day's average.
+* **Telegram**: member growth over 6 hours and the share online, from the public counts the bot-risk check reads.
+* **Website**: the age of its domain from public RDAP registration records, or a flag when it sits on a free host or
+  link page (vercel.app, linktr.ee and the like), whose age says nothing.
+
+Each source runs within a per-run budget, coins inside the screener first, and the three slow ones (orders, X, RDAP) in
+parallel threads. The variables go everywhere the others go: the Lab and the gate review test them as candidate
+gates (`ATTENTION_CANDIDATES`), Buy & sell tests them as entry rules (`ATTENTION_RULES`) and sell-side warnings (boosts
+or ads bought, a top-5 trending rank after a push, an X follower spike), and the Models tab trains on them. The rules
+joined their benches the scan the data started, not at the next weekly intake, so their forward records start now.
+Each token's X-ray has an Attention section with every reading.
+
+## Correlations
+
+The Correlations tab (`undertow/corr.py`, once an hour) asks four questions of every variable, as Spearman rank
+correlations with t from errors clustered by coin: does it just track market cap; does its change over an hour move
+with the price over the same hour; does its change lead the price over the next hour; and does its level predict the
+price change over the next 1, 4 and 12 hours, with the earlier and later half of the window shown separately. Market
+cap is price times a fixed supply, so the same figures hold for it. The sample is the Buy & sell path (every coin
+passing every gate), one reading per coin per hour. "Holds" needs |rho| of at least 0.05, t of at least 2 and the same
+sign in both halves; variables worked out from the price itself are not scored on moving with it.
+
+## Models: machine learning, tested twice
+
+`undertow/models.py` trains every algorithm in `undertow/zoo.py` plus an LSTM (`undertow/lstm.py`) on three variable
+sets (every variable; every variable except attention; attention and the price path only), so the gap between the
+first two shows what attention adds. The algorithms: logistic regression, random forest, extra trees, gradient
+boosting, XGBoost, LightGBM, k nearest neighbours, naive Bayes, a small neural network, the LSTM over each coin's last 8
+scans, and five models of the trade's return (ridge, random forest, gradient boosting, XGBoost, LightGBM), with a
+random-score control. Exit models (logistic regression, random forest, gradient boosting, LightGBM, neural network)
+learn whether selling an open trade now beats holding on to the live exit.
+
+* **Training.** `.github/workflows/train.yml` runs `undertow/train.py` every 6 hours. It copies the Buy & sell path into
+  its own history (kept up to 60 days, beyond the 14 the scanner keeps), labels one sample per coin per hour with the
+  paper trade opened there under the live exit, after costs, and trains once there are 1,200 samples on 40 coins. The
+  models go to their own Actions cache; each scan restores the latest.
+* **Walk-forward test.** Folds split by time; each trains only on samples whose trades had closed before its test
+  window opened (purging), so no training label reaches into a test window. Every figure on the tab is out
+  of sample: AUC, accuracy, balanced accuracy, Brier score, the average after costs of the trades in the top fifth of
+  scores (the threshold set on training scores only), the edge over all test trades, and a luck line, the 95th
+  percentile of what the luckiest of as many random pickers would have averaged. The training AUC is shown only to
+  expose the overfitting gap.
+* **Forward test.** From the scan after training, each model buys on paper when a coin passing every gate scores at or
+  above its threshold, and every entry is logged with the coin and its UTC time. Model rules sit on the Buy & sell bench
+  and face the same bar as any rule (30 matured trades averaging +1% after costs with t ≥ 2, two reviews in a row).
+  Exit models are exit policies on the same bench, compared with the live exit on the same trades. A model trained more
+  than 30 hours ago opens no trades.
+
+**What the candle study found first** (`tools/study/study_ml.py`, 7,476 sample entries on 419 coins, 18-20 October
+2026): the trees ranked winners above losers out of sample (random forest AUC 0.673, boosted trees about 0.667,
+against 0.498 for random scores), but no model's picks made money after costs; the closest, random forest on returns,
+averaged -0.7% a trade. Boosted trees overfit most (training AUC 0.89-0.97), and no exit model beat a +10% target sold
+within 8 hours. Ranking beats chance; the edge is smaller than the 4-5% a $500 round trip costs.
+
 ## Rug calls, votes and tags
 
 From a token's X-ray, signed-in visitors can:
@@ -320,6 +392,11 @@ the page shows when the last scan ran and warns when one is overdue.
     undertow/momentum.py   percentile-rank momentum (pure)
     undertow/review.py     the weekly gate review: verdicts, drops, promotions, the testing bench (pure)
     undertow/trade.py      buy and sell signals: entry rules, exit policies, paper trades, the weekly trade review (pure)
+    undertow/attention.py  attention variables: boosts, ads, trending ranks, X followers, Telegram, domain age (pure)
+    undertow/corr.py       the Correlations tab: every variable against the price (pure)
+    undertow/models.py     the Models tab: datasets, walk-forward tests, training, loading and scoring
+    undertow/zoo.py        the algorithms, small and regularised; lstm.py, the LSTM in numpy
+    undertow/train.py      the training job: copies the path into its history, trains, saves the models
     undertow/community.py  the scan's side of rug calls: list tokens, price and settle calls, read the crowd
     undertow/notify.py     optional Telegram alerts
     undertow/store.py      SQLite
@@ -327,11 +404,13 @@ the page shows when the last scan ran and warns when one is overdue.
     undertow/cloud.py      the claude.ai copy's cycle: restore the saved state, scan once, build, review, save the state
     seed/undertow.db.gz    the history a fresh GitHub Actions cache starts from
     supabase/schema.sql    tables, security rules and functions for rug calls, votes and tags
-    web/                   page source (style, body, app.js, trade.* for Buy & sell; community.* only in the GitHub build);
+    web/                   page source (style, body, app.js, trade.* for Buy & sell, corr.js and models.* for the
+                           Correlations and Models tabs; community.* only in the GitHub build);
                            build_page.py inlines it
     tools/fetch_candles.py research only: candles for every token seen, run by .github/workflows/study-candles.yml
     tools/study/           research only: the candle study behind the first Buy & sell bench (merge.py says how to run it)
-    .github/workflows/     scan.yml (the scan), export-db.yml and study-candles.yml (manual, for offline analysis)
+    .github/workflows/     scan.yml (the scan), train.yml (the models, every 6 hours), export-db.yml and
+                           study-candles.yml (manual, for offline analysis)
 
 ## Known limits (read before trusting a result)
 
@@ -350,7 +429,11 @@ the page shows when the last scan ran and warns when one is overdue.
   not traced from launch transactions.
 * **The copycat-ticker check** from the study is not implemented: Jupiter's free search returns at most 20 matches.
 * **Heuristics are uncalibrated**: Telegram bot-risk, momentum quality and the non-study thresholds.
-* **X data is not free**, so only the handle is used (and checked for reuse across tokens).
+* **Visitor counts are not public.** Attention comes from stand-ins (trending ranks, paid promotion, followers), and X
+  followers come from a free third-party mirror that can lag, fail or disappear; a failed read is marked, not guessed.
+* **Models see a short history.** Days, not months, of one market regime: a model that clears every test can still
+  fail when the market turns, which is why only its forward record can make it live. Testing about 45 models at once
+  means some will look good by luck; the luck line and the forward bar are there for that.
 * **The weekly review tests many things at once.** Two reviews in a row and 2.5 standard errors cut the false
   alarms, they do not remove them, and four weeks of one market regime is still one regime.
 * **The crowd can be gamed** (sock-puppet accounts, coordinated tags). That is why it never gates, and why calls are

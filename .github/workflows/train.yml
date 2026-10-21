@@ -1,0 +1,46 @@
+name: train
+# Retrains the Models tab's models every 6 hours from the scanner's saved history (undertow/train.py, undertow/models.py).
+# It only reads the scan's cache, so it never disturbs a running scan; the models and the training history go to their
+# own cache, which the next scan restores and scores with.
+on:
+  schedule:
+    - cron: "41 */6 * * *"
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: train
+  cancel-in-progress: false
+jobs:
+  train:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-ml.txt
+      - run: pip install -r requirements-ml.txt
+      - name: Restore the scanner's latest history
+        uses: actions/cache/restore@v4
+        with:
+          path: state/undertow.db
+          key: undertow-db-never-matches
+          restore-keys: undertow-db-
+      - name: Restore the models and the training history kept between runs
+        uses: actions/cache/restore@v4
+        with:
+          path: state/models
+          key: undertow-models-never-matches
+          restore-keys: undertow-models-
+      - name: Train and test every model
+        run: |
+          test -s state/undertow.db || { echo "::error::no saved history in the cache"; exit 1; }
+          python3 -m undertow.train --db state/undertow.db --dir state/models
+          ls -la state/models
+      - uses: actions/cache/save@v4
+        with:
+          path: state/models
+          key: undertow-models-${{ github.run_id }}-${{ github.run_attempt }}

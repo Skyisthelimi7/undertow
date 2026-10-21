@@ -308,7 +308,7 @@ class Ledger(unittest.TestCase):
     def scan(self, now, prices, hard=()):
         rows = [fake_row(m, p, hard=m in hard) for m, p in prices.items()]
         ds = {m: {"price": p, "liq": 200_000, "chg": {"h1": 0.0}} for m, p in prices.items()}
-        pol, feats, ch = SC.trade_step(self.st, rows, ds, now, {})
+        pol, feats, ch, _picks, _sells = SC.trade_step(self.st, rows, ds, now, {})
         return pol, feats, ch, rows
 
     def test_rules_open_trades_that_every_exit_follows(self):

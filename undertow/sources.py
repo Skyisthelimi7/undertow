@@ -72,7 +72,9 @@ def ds_tokens(mints):
             liq = ((p.get("liquidity") or {}).get("usd")) or 0
             if m in out and liq <= out[m]["liq"]:
                 continue
-            soc = {s.get("type"): s.get("url") for s in ((p.get("info") or {}).get("socials") or [])}
+            info = p.get("info") or {}
+            soc = {s.get("type"): s.get("url") for s in (info.get("socials") or [])}
+            sites = [w.get("url") for w in (info.get("websites") or []) if w.get("url")]
             tx = p.get("txns") or {}
             out[m] = {
                 "symbol": p["baseToken"].get("symbol"), "name": p["baseToken"].get("name"),
@@ -83,8 +85,91 @@ def ds_tokens(mints):
                 "buys24": (tx.get("h24") or {}).get("buys"), "sells24": (tx.get("h24") or {}).get("sells"),
                 "buys1": (tx.get("h1") or {}).get("buys"), "sells1": (tx.get("h1") or {}).get("sells"),
                 "created": p.get("pairCreatedAt"), "twitter_url": soc.get("twitter"), "telegram_url": soc.get("telegram"),
+                # paid DEX Screener boosts running now (absent means none), the project's website, and how many links
+                # its DEX Screener profile lists
+                "boosts": (p.get("boosts") or {}).get("active") or 0, "website_url": sites[0] if sites else None,
+                "n_links": len(soc) + len(sites),
             }
     return out
+
+
+def ds_orders(mint):
+    """What has been paid for on DEX Screener for this token: approved ads, trending-bar ads, an enhanced profile, a
+    community takeover. {"ads", "trend_ads", "ad_last" (unix s), "profile", "cto"} or None on failure."""
+    d = fetch("dexscreener", f"{DS}/orders/v1/solana/{mint}", tries=2)
+    if d is None:
+        return None
+    orders = d.get("orders") if isinstance(d, dict) else d
+    ok = [o for o in orders or [] if o.get("status") in ("approved", "processing")]
+    ads = [o for o in ok if o.get("type") == "tokenAd"]
+    paid = [(o.get("paymentTimestamp") or 0) / 1000 for o in ok if o.get("type") in ("tokenAd", "trendingBarAd")]
+    return {"ads": len(ads), "trend_ads": sum(1 for o in ok if o.get("type") == "trendingBarAd"),
+            "ad_last": max(paid) if paid else None, "profile": int(any(o.get("type") == "tokenProfile" for o in ok)),
+            "cto": int(any(o.get("type") == "communityTakeover" for o in ok))}
+
+
+# ---- Attention: trending lists, X followers, website domain age ------------------------------
+def gt_trending(duration="1h", pages=2):
+    """GeckoTerminal's trending pools for Solana, in rank order, as base-token mints. GeckoTerminal ranks them on user
+    engagement on its site, market activity and pool security, so a rank is the nearest free stand-in for visits.
+    duration: 5m, 1h, 6h or 24h. Returns None when the first page fails."""
+    out = []
+    for pg in range(1, pages + 1):
+        d = fetch("geckoterminal", f"{GT}/trending_pools?duration={duration}&page={pg}")
+        if d is None:
+            return out or None
+        for p in d.get("data") or []:
+            base = (((p.get("relationships") or {}).get("base_token") or {}).get("data") or {}).get("id", "")
+            m = base.split("_", 1)[1] if "_" in base else None
+            if m and m != SOL and m not in out:
+                out.append(m)
+    return out
+
+
+def x_profile(handle):
+    """Public follower count of an X account through fxtwitter's free mirror (X's own API is paid), falling back to
+    vxtwitter. {"followers", "tweets"} or None."""
+    if not handle:
+        return None
+    d = fetch("fxtwitter", f"https://api.fxtwitter.com/{handle}", tries=2)
+    u = (d or {}).get("user") if isinstance(d, dict) else None
+    if u and u.get("followers") is not None:
+        return {"followers": u.get("followers"), "tweets": u.get("tweets")}
+    d = fetch("vxtwitter", f"https://api.vxtwitter.com/{handle}", tries=1)
+    if isinstance(d, dict) and d.get("followers_count") is not None:
+        return {"followers": d.get("followers_count"), "tweets": d.get("tweet_count")}
+    return None
+
+
+_TWO_PART = {"co.uk", "org.uk", "com.au", "co.jp", "com.br", "co.in", "co.za", "com.cn", "co.kr", "com.mx", "com.tr"}
+
+
+def domain_of(url):
+    """The registrable domain of a website address: 'https://app.example.co.uk/x' -> 'example.co.uk'."""
+    from urllib.parse import urlparse
+    if not url:
+        return None
+    host = (urlparse(url if "//" in url else "//" + url).hostname or "").lower().strip(".")
+    parts = [p for p in host.split(".") if p]
+    if len(parts) < 2:
+        return None
+    n = 3 if ".".join(parts[-2:]) in _TWO_PART and len(parts) >= 3 else 2
+    return ".".join(parts[-n:])
+
+
+def domain_registered(domain):
+    """When the website's domain was registered (unix seconds), from public RDAP records; None when unknown."""
+    import calendar
+    if not domain:
+        return None
+    d = fetch("rdap", f"https://rdap.org/domain/{domain}", tries=1)
+    for e in (d or {}).get("events") or []:
+        if e.get("eventAction") == "registration" and e.get("eventDate"):
+            try:
+                return calendar.timegm(time.strptime(e["eventDate"][:19], "%Y-%m-%dT%H:%M:%S"))
+            except ValueError:
+                return None
+    return None
 
 
 # ---- RugCheck: authorities, holders, creator, LP, insider graph ------------------------------

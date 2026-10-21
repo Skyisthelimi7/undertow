@@ -10,7 +10,7 @@ on:
         default: false
   push:                          # a code change is scanned and deployed at once
     branches: [main]
-    paths: ["undertow/**", "web/**", "build_page.py", "seed/**", ".github/workflows/scan.yml"]
+    paths: ["undertow/**", "web/**", "build_page.py", "seed/**", "requirements-ml.txt", ".github/workflows/scan.yml"]
 permissions:
   contents: read
   pages: write
@@ -29,7 +29,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
-        with: { python-version: "3.12" }
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-ml.txt
+      # the Models tab scores coins with the models the train workflow saves; the scan itself needs none of these, so
+      # a failed install only switches the models off for this run
+      - name: Install the machine-learning libraries
+        continue-on-error: true
+        run: pip install -r requirements-ml.txt
+      - name: Restore the latest trained models
+        uses: actions/cache/restore@v4
+        with:
+          path: state/models
+          key: undertow-models-never-matches
+          restore-keys: undertow-models-
       # The SQLite file carries the history (tracker, hourly snapshots, the Lab, gate streaks) between runs in the
       # Actions cache. The first run, or one after the cache was evicted, starts from the history saved in seed/.
       - id: restore
@@ -54,7 +68,7 @@ jobs:
             echo "go=false" >> "$GITHUB_OUTPUT"
           fi
       - if: steps.prep.outputs.go == 'true'
-        run: python3 -m undertow.scan run --db state/undertow.db --out site/data.json --cadence 20
+        run: python3 -m undertow.scan run --db state/undertow.db --out site/data.json --cadence 20 --models state/models
         env:                            # all optional; leave the secrets unset to run keyless and without alerts
           JUP_API_KEY: ${{ secrets.JUP_API_KEY }}
           SOLANA_RPC_URL: ${{ secrets.SOLANA_RPC_URL }}

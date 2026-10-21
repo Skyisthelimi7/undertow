@@ -4,8 +4,13 @@ Run:  python3 -m undertow.scan run --db undertow.db --out docs/data.json
 import argparse, csv, json, os, sys, time
 from collections import defaultdict
 from . import config as C, sources as S, gates as G, momentum as M, tgrisk, signals as SG, tracker as TR, notify, http, lab as LAB
-from . import review as REV, community as COM, trade as TRD
+from . import review as REV, community as COM, trade as TRD, attention as ATT, corr as CORR
 from .store import Store, TSNAP_VARS, PATH_STATE
+try:                                  # the Models tab needs numpy and the ML libraries (requirements-ml.txt)
+    from . import models as MOD
+except ImportError:
+    MOD = None
+MODELS_DIR = os.environ.get("UNDERTOW_MODELS", "state/models")
 
 H = 3600.0
 
@@ -23,14 +28,25 @@ def fmt(v):
 
 # ------------------------------------------------------------------ discovery
 def discover(st, now, jcache):
-    """Jupiter's category lists (every launchpad and DEX, 100 tokens each) every run; GeckoTerminal's per-DEX pool
-    lists hourly. Everything seen is kept for UNIVERSE_TTL_DAYS, so the universe builds up across runs."""
-    seen, calls = {}, 0
+    """Jupiter's category lists (every launchpad and DEX, 100 tokens each) and GeckoTerminal's trending pools every
+    run; GeckoTerminal's per-DEX pool lists hourly. Everything seen is kept for UNIVERSE_TTL_DAYS, so the universe
+    builds up across runs. Returns the trending lists in rank order, for the attention variables."""
+    seen, calls, lists = {}, 0, {}
     for path in C.JUP_LISTS:
-        for j in S.jup_list(path):
+        got = S.jup_list(path)
+        for j in got:
             jcache[j["mint"]] = j
             seen.setdefault(j["mint"], {"mint": j["mint"], "pool": "", "dex": "", "name": j.get("symbol")})
+        if path in ("toptrending/1h", "toptrending/6h") and got:
+            lists["jup" + path.split("/")[1]] = [j["mint"] for j in got]
         calls += 1
+    for dur, key in (("1h", "gt1h"), ("5m", "gt5m")):
+        ranked = S.gt_trending(dur, C.ATTN["gt_pages_" + dur])
+        calls += C.ATTN["gt_pages_" + dur]
+        if ranked:
+            lists[key] = ranked
+            for m in ranked:
+                seen.setdefault(m, {"mint": m, "pool": "", "dex": "", "name": None})
     n_jup = len(seen)
     last = st.get_meta("last_gt_discovery")
     if not last or now - float(last) >= C.DISCOVERY_EVERY_MIN * 60:
@@ -53,8 +69,9 @@ def discover(st, now, jcache):
     for p in seen.values():
         st.upsert_seen(p, now)
     st.commit()
-    log(f"discovery: {len(seen)} tokens ({n_jup} from Jupiter lists) from {calls} calls")
-    return seen
+    log(f"discovery: {len(seen)} tokens ({n_jup} from Jupiter and GeckoTerminal's trending lists) from {calls} calls; "
+        f"trending lists: {', '.join(f'{k} {len(v)}' for k, v in lists.items()) or 'none'}")
+    return seen, lists
 
 
 # ------------------------------------------------------------------ helpers
@@ -86,6 +103,79 @@ def handle_from_url(u):
         return None
     h = segs[0].lstrip("@").lower()
     return None if h in ("i", "intent", "search", "home", "share", "hashtag", "explore", "status") else h
+
+
+def age_h(m):
+    return m["age_min"] / 60 if m.get("age_min") is not None else None
+
+
+def x_handle(j, gt, d):
+    return (handle_from_url((j or {}).get("twitter")) or handle_from_url((gt or {}).get("twitter"))
+            or handle_from_url((d or {}).get("twitter_url")))
+
+
+def site_of(j, gt, d):
+    return (j or {}).get("website") or (gt or {}).get("website") or (d or {}).get("website_url")
+
+
+def fetch_attention(st, want, ds_all, jup, now):
+    """DEX Screener orders, X followers and website domain age for coins inside the screener or close to passing,
+    each within its per-run budget, coins inside first. The three sources run in parallel threads, so their waits
+    between calls overlap instead of adding up. Stores what came back in each coin's attention record."""
+    from concurrent.futures import ThreadPoolExecutor
+    A = C.ATTN
+    recs = {t["mint"]: (json.loads(t["attn_json"]) if t.get("attn_json") else {}) for t in want}
+    order = sorted(want, key=lambda t: (t["status"] != "IN", t["mint"]))
+    q_ord = [t["mint"] for t in order if ATT.due(recs[t["mint"]].get("orders"), now, A["orders_ttl_h"])][:A["orders_budget"]]
+    by_handle, by_domain, changed = {}, {}, set()
+    for t in order:
+        m = t["mint"]
+        gt = json.loads(t["gt_json"]) if t.get("gt_json") else None
+        j, d = jup.get(m), ds_all.get(m)
+        h = x_handle(j, gt, d)
+        xr = recs[m].get("x")
+        ttl = A["x_ttl_h_in"] if t["status"] == "IN" else A["x_ttl_h"]
+        if h and (not xr or xr.get("handle") != h or ATT.due(xr, now, ttl)):
+            by_handle.setdefault(h, []).append(m)
+        dom = S.domain_of(site_of(j, gt, d))
+        w = recs[m].get("web") or {}
+        retry = not w.get("free") and not w.get("reg") and now - (w.get("ts") or 0) >= A["web_retry_days"] * 86400
+        if dom and (w.get("domain") != dom or retry):
+            if dom in ATT.FREE_HOSTS:
+                recs[m]["web"] = {"domain": dom, "free": 1, "ts": now}
+                changed.add(m)
+            else:
+                by_domain.setdefault(dom, []).append(m)
+    q_x, q_web = list(by_handle)[:A["x_budget"]], list(by_domain)[:A["web_budget"]]
+
+    def loop(host, items, fn):
+        out = {}
+        for k in items:
+            if http.down(host):
+                break
+            out[k] = fn(k)
+        return out
+    with ThreadPoolExecutor(3) as ex:
+        jobs = [ex.submit(loop, "dexscreener", q_ord, S.ds_orders), ex.submit(loop, "fxtwitter", q_x, S.x_profile),
+                ex.submit(loop, "rdap", q_web, S.domain_registered)]
+        got_o, got_x, got_w = (f.result() for f in jobs)
+    for m, o in got_o.items():
+        recs[m]["orders"] = {**o, "ts": now} if o is not None else {"ts": now, "fail": 1}
+        changed.add(m)
+    for h, res in got_x.items():
+        for m in by_handle[h]:
+            recs[m]["x"] = ATT.add_x(recs[m].get("x"), h, res, now)
+            changed.add(m)
+    for dom, reg in got_w.items():
+        for m in by_domain[dom]:
+            recs[m]["web"] = {"domain": dom, "free": 0, "reg": reg, "ts": now}
+            changed.add(m)
+    for t in want:
+        if t["mint"] in changed:
+            t["attn_json"] = json.dumps(recs[t["mint"]], separators=(",", ":"))
+            st.set_cols(t["mint"], attn_json=t["attn_json"])
+    return {"orders": len(got_o), "orders_ok": sum(1 for v in got_o.values() if v is not None), "x": len(got_x),
+            "x_ok": sum(1 for v in got_x.values() if v), "web": len(got_w), "web_ok": sum(1 for v in got_w.values() if v)}
 
 
 def history_metrics(st, mint, now, rc):
@@ -209,7 +299,7 @@ def gate_features(m, d, j, tg=None):
     return LAB.features(d, m, j, None, None, tg, None)
 
 
-def process(st, now, toks, budget, ds_all, jcache, policy=None, crowd=None):
+def process(st, now, toks, budget, ds_all, jcache, policy=None, crowd=None, lists=None):
     events = []
     # 0. a token that was inside but is no longer priced anywhere cannot be checked, so it leaves
     for t in toks:
@@ -278,7 +368,8 @@ def process(st, now, toks, budget, ds_all, jcache, policy=None, crowd=None):
                     exitq=json.loads(t["exit_json"]) if t.get("exit_json") else None,
                     rpc=json.loads(t["rpc_json"]) if t.get("rpc_json") else None,
                     lock=json.loads(t["lock_json"]) if t.get("lock_json") else None,
-                    gp=json.loads(t["gp_json"]) if t.get("gp_json") else None)
+                    gp=json.loads(t["gp_json"]) if t.get("gp_json") else None,
+                    attn=json.loads(t["attn_json"]) if t.get("attn_json") else {})
 
     # B. first pass: which tokens are worth the expensive checks (exit quote, trade list)?
     pre = {}
@@ -287,6 +378,7 @@ def process(st, now, toks, budget, ds_all, jcache, policy=None, crowd=None):
         hist = history_metrics(st, t["mint"], now, c["rc"])
         m = build_metrics(c["d"], c["rc"], hist, c["j"], c["exitq"], c["rpc"], c["lock"], None, rc_down, now, c["gp"])
         m["crowd"] = (crowd or {}).get(t["mint"])
+        m["attn"] = ATT.features(c["attn"], now, t["mint"], c["d"], lists, age_h=age_h(m))
         m["_f"] = gate_features(m, c["d"], c["j"])
         gates = G.evaluate(m, t["status"] == "IN", policy)
         close = not [g for g in G.blocking(gates) if g["id"] not in ("exit", "riskflags", "telegram")]
@@ -321,8 +413,11 @@ def process(st, now, toks, budget, ds_all, jcache, policy=None, crowd=None):
         tr = S.gt_trades(ds_all[t["mint"]].get("pair"))
         if tr is not None:
             trades[t["mint"]] = tr
+    na = fetch_attention(st, want, ds_all, jup, now)
     st.commit()
     log(f"exit quotes: {n_q}, GoPlus checks: {n_gp}, trade lists: {len(trades)} of {len(young)} young coins near the gates")
+    log(f"attention: DEX Screener orders {na['orders_ok']} of {na['orders']}, X followers {na['x_ok']} of {na['x']} "
+        f"handles, website domains {na['web_ok']} of {na['web']}")
 
     # D. final metrics, gates, Telegram, state machine
     rows, handles = [], {}
@@ -334,10 +429,11 @@ def process(st, now, toks, budget, ds_all, jcache, policy=None, crowd=None):
         was_in = t["status"] == "IN"
         m = build_metrics(d, rc, hist, j, c["exitq"], c["rpc"], c["lock"], trades.get(mint), rc_down, now, c["gp"])
         m["crowd"] = (crowd or {}).get(mint)
+        m["attn"] = ATT.features(c["attn"], now, mint, d, lists, age_h=age_h(m))
         m["_f"] = gate_features(m, d, j)
         gates = G.evaluate(m, was_in, policy)
 
-        tw = handle_from_url((j or {}).get("twitter")) or handle_from_url((gt or {}).get("twitter")) or handle_from_url(d.get("twitter_url"))
+        tw = x_handle(j, gt, d)
         tgh = handle_from_url((j or {}).get("telegram")) or handle_from_url((gt or {}).get("telegram")) or handle_from_url(d.get("telegram_url"))
         tgd = None
         if tgh and (was_in or not G.blocking(gates)):
@@ -348,7 +444,9 @@ def process(st, now, toks, budget, ds_all, jcache, policy=None, crowd=None):
                 risk, why = tgrisk.bot_risk(cnt["members"], cnt["online"], m.get("holders"), hist_tg)
                 m["tg_bot_risk"] = risk
                 tgd = {"handle": tgh, "members": cnt["members"], "online": cnt["online"], "bot_risk": risk, "why": why,
-                       "growth_h": tgrisk.growth_per_hour(hist_tg), "kind": cnt["kind"]}
+                       "growth_h": tgrisk.growth_per_hour(hist_tg), "kind": cnt["kind"],
+                       "growth_6h": tgrisk.growth_per_hour([p for p in hist_tg if p[0] >= now - 6 * H])}
+                m["attn"] = ATT.features(c["attn"], now, mint, d, lists, tgd, age_h(m))
                 m["_f"] = gate_features(m, d, j, tgd)
                 gates = G.evaluate(m, was_in, policy)
         elif tgh:
@@ -412,6 +510,11 @@ def process(st, now, toks, budget, ds_all, jcache, policy=None, crowd=None):
         if rc and t["rc_ts"] == now:
             snap.update(holders=rc["holders"], top10=rc["top10"], creator_pct=rc["creator_pct"], creator_bal=rc["creator_bal"], top20=rc["top20"])
         st.add_snap(mint, now, snap)
+        # attention's hourly history (boosts and trending ranks), which spikes are measured against
+        arec, grew = ATT.add_hourly(c["attn"], now, m["attn"])
+        if grew:
+            t["attn_json"] = json.dumps(arec, separators=(",", ":"))
+            st.set_cols(mint, attn_json=t["attn_json"])
 
         v24 = m["vol24"] or 0
         s1 = (j or {}).get("s1h") or {}
@@ -424,7 +527,7 @@ def process(st, now, toks, budget, ds_all, jcache, policy=None, crowd=None):
             "vol_accel": ((d.get("vol") or {}).get("h1") or 0) * 24 / v24 if v24 else None,
             "flow_pct": flow1 / d["liq"] if flow1 is not None and d.get("liq") else None,
             "breadth": SG.buyer_breadth(s1), "holder_growth": s1.get("holder_change"),
-            "tg_growth": (tgd or {}).get("growth_h"),
+            "tg_growth": (tgd or {}).get("growth_h"), "attn": ATT.for_page(arec, m["attn"]),
         })
     st.commit()
 
@@ -828,7 +931,7 @@ def export(st, rows, handles, now, meta, out_path):
             "quality": r.get("mq"),
             "rc_score": (rc or {}).get("score"), "rc_risks": (rc or {}).get("risks"),
             "x": {"handle": tw, "shared_with": len(shared)}, "tg": r["tg"],
-            "website": j.get("website") or (gt or {}).get("website"),
+            "website": site_of(j, gt, d), "attn": r.get("attn"),
             "momentum": r["momentum"], "gates": [pack(g) for g in r["gates"]],
             "spark": spark(st.snaps(t["mint"], now - 24 * H), now),
             "dex": d.get("dex"), "pair": d.get("pair"), "tracker": trk_by.get(t["mint"]),
@@ -847,14 +950,16 @@ def export(st, rows, handles, now, meta, out_path):
                 "LFDV_THIN", "RISK_FLAGS", "RUG_RATE_BY_FLAGS", "DOUBLED_RATE_BY_FLAGS", "CALIBRATED_MAX_AGE_H",
                 "CALIBRATED_MAX_FDV", "MAX_RISK_FLAGS", "HOLDER_GATES_FOR_LAUNCHPADS", "TRADES_BUDGET", "TSNAP_EVERY_MIN",
                 "TSNAP_FULL_H", "SNAP_BUCKETS", "MAX_CLUSTER_PCT", "GATE_ON_CLUSTER", "GP_TTL_H", "LIVE_URL", "REVIEW",
-                "SUPABASE_URL", "SUPABASE_PUBLISHABLE_KEY", "SUPABASE_X_LOGIN", "CALL_BASE_RATE")
+                "SUPABASE_URL", "SUPABASE_PUBLISHABLE_KEY", "SUPABASE_X_LOGIN", "CALL_BASE_RATE", "ATTN", "CORR", "MODELS")
     lab, lab_rows = lab_report(st)
     out_dir = os.path.dirname(os.path.abspath(out_path))
     symbols = st.symbols()
     write_obs_csv(os.path.join(out_dir, "observations.csv"), lab_rows, symbols)
     n_ts = write_snapshot_files(out_dir, st, symbols)
     review, trade = meta.pop("review", None), meta.pop("trade", None)
-    doc = {"generated_at": now, "published_at": time.time(), "lab": lab, "review": review, "trade": trade, "meta": {**meta, "counts_in_by_band": counts,
+    models, corr = meta.pop("models", None), meta.pop("corr", None)
+    doc = {"generated_at": now, "published_at": time.time(), "lab": lab, "review": review, "trade": trade, "models": models,
+           "corr": corr, "meta": {**meta, "counts_in_by_band": counts,
            "in": sum(1 for x in toks if x["state"] in ("IN", "WATCH")), "entering": sum(1 for x in toks if x["state"] == "ENTERING"),
            "out_listed": sum(1 for x in toks if x["state"] == "OUT"), "cadence_min": C.SCAN_MINUTES, "snapshots": n_ts},
            "config": {k: getattr(C, k) for k in cfg_keys}, "slots": SLOTS,
@@ -892,10 +997,37 @@ def gate_meta(rows):
     return meta
 
 
+ATTN_SOURCE = "attention, added when its data started"
+
+
 def candidate_pool():
-    """Rules waiting to be tested, in order: the Lab's shadow rules first, then the queued pool."""
+    """Rules waiting to be tested, in order: the Lab's shadow rules first, then attention's, then the queued pool."""
     return ([{"id": r[0], "label": r[1], "key": r[2], "op": r[3], "at": r[4], "source": "Lab shadow rule"} for r in C.SHADOW_RULES]
+            + [{"id": r[0], "label": r[1], "key": r[2], "op": r[3], "at": r[4], "source": ATTN_SOURCE} for r in C.ATTENTION_CANDIDATES]
             + [{"id": r[0], "label": r[1], "key": r[2], "op": r[3], "at": r[4], "source": "pool"} for r in C.CANDIDATE_POOL])
+
+
+def add_attention_candidates(st, policy, now):
+    """Attention's candidate gates join the gate review's bench at once, outside the weekly intake, so their record
+    starts with the data; the next review judges them like every other candidate. Returns the policy."""
+    if not policy:
+        return policy
+    have = {c["id"] for c in policy.get("candidates") or []}
+    new = []
+    for r in C.ATTENTION_CANDIDATES:
+        if r[0] in have:
+            continue
+        c = {"id": r[0], "label": r[1], "key": r[2], "op": r[3], "at": r[4], "status": "testing", "added": now,
+             "since": now, "source": ATTN_SOURCE}
+        policy.setdefault("candidates", []).append(c)
+        new.append({"ts": now, "what": "testing", "id": c["id"], "label": c["label"],
+                    "reason": f"Added for testing on {REV._day(now)} ({ATTN_SOURCE})."})
+    if new:
+        policy["log"] = ((policy.get("log") or []) + new)[-200:]
+        st.set_meta("policy", json.dumps(policy))
+        st.commit()
+        log(f"gate review: {len(new)} attention candidates put on the bench")
+    return policy
 
 
 def weekly_review(st, rows, now, policy):
@@ -981,10 +1113,19 @@ def seed_tpath(st, now):
     return len(rows)
 
 
-def trade_step(st, rows, ds_all, now, regime):
-    """One scan of the paper ledger: record the path, step every open paper trade, run the weekly review when due,
-    then let the bench's rules fire on coins that pass every gate. Returns (policy, features by coin, changes)."""
-    cfg, exits = C.TRADE, {e["id"]: e for e in C.EXIT_POOL}
+def exit_pool_of(bank):
+    """The bench's exit policies: the configured ones plus one per trained exit model (models.py)."""
+    return C.EXIT_POOL + (MOD.exit_policies(bank.summary) if MOD and bank and bank.summary else [])
+
+
+def trade_step(st, rows, ds_all, now, regime, bank=None):
+    """One scan of the paper ledger: record the path, step every open paper trade (asking the exit models first), run
+    the weekly review when due, then let the bench's rules and the entry models fire on coins that pass every gate.
+    Returns (policy, features by coin, changes, model picks {model: {mint: score}}, exit-model sells {(sig, policy)})."""
+    cfg = C.TRADE
+    exit_pool = exit_pool_of(bank)
+    exits = {e["id"]: e for e in exit_pool}
+    loaded_x = {pid for pid in exits if pid.startswith("x:") and bank and bank.fresh and pid in bank.exit}
     policy = json.loads(st.get_meta("trade_policy") or "null")
     seed_tpath(st, now)
     by = {r["t"]["mint"]: r for r in rows}
@@ -1006,9 +1147,29 @@ def trade_step(st, rows, ds_all, now, regime):
     st.add_tpath(path)
 
     seen = {p[1]: {"price": p[3], "liq": p[4], "c1h": p[5], "hard": p[2] == "X"} for p in path}
+    # the exit models: for every open trade still undecided under a model's policy, sell now or hold?
+    sells = set()
+    if loaded_x and ds_all:
+        items = []
+        for s in open_sigs:
+            o = seen.get(s["mint"])
+            if not o or not o.get("price"):
+                continue
+            for pid, pst in (s["st"] or {}).items():
+                if pid in loaded_x:
+                    state = MOD.trade_state(s["in_ts"], s["in_price"], s["in_liq"], (pst or {}).get("peak"), o["price"],
+                                            o.get("liq"), now)
+                    items.append((s["id"], pid, MOD.exit_row(feats.get(s["mint"]), o.get("c1h"), state)))
+        _probs, sells = bank.exit_calls(items, C.MODELS["exit_thr"])
+    sell_by = defaultdict(dict)
+    for sid, pid in sells:
+        sell_by[sid][pid] = True
     if ds_all:                                 # a scan that priced nothing (DEX Screener down) steps no trade
         for s in open_sigs:
-            out, sst, miss, lp, ll, done = TRD.advance(s, seen.get(s["mint"]), now, exits, cfg)
+            obs = seen.get(s["mint"])
+            if obs is not None and s["id"] in sell_by:
+                obs = {**obs, "xm": sell_by[s["id"]]}
+            out, sst, miss, lp, ll, done = TRD.advance(s, obs, now, exits, cfg)
             ref_out = s.get("ref_out_ts")
             if ref_out is None and (s["ref"] in out or s["ref"] not in exits):
                 ref_out = out[s["ref"]][3] if s["ref"] in out else now
@@ -1021,38 +1182,63 @@ def trade_step(st, rows, ds_all, now, regime):
             fwd[s["rule"]].append({"mint": s["mint"], "in_ts": s["in_ts"], "live": s["live"],
                                    "out": {pid: o[0] for pid, o in (s["out"] or {}).items()}})
         policy, changes = TRD.run_review(policy, st.tpath(now - cfg["path_days"] * 86400), fwd, now, cfg,
-                                         C.ENTRY_POOL, C.EXIT_POOL, C.DEFAULT_EXIT, C.SELL_WARNINGS)
+                                         C.ENTRY_POOL, exit_pool, C.DEFAULT_EXIT, C.SELL_WARNINGS)
         st.set_meta("trade_policy", json.dumps(policy))
         log(f"trade review: {len(changes)} changes; live exit {policy['exit']}; "
             f"{sum(1 for x in policy['rules'] if x['status'] == 'live')} live rules")
 
-    opened = 0
+    picks, opened = {}, 0
     if policy:
+        # rules on new attention data and the models' rules join the bench at once (trade.add_rules)
+        added = TRD.add_rules(policy, C.ATTENTION_RULES, now, ATTN_SOURCE)
+        if MOD and bank and (bank.summary or {}).get("status") == "ok":
+            added += TRD.add_rules(policy, MOD.rules_for(bank.summary), now, "model")
+        if added:
+            changes = changes + added
+            st.set_meta("trade_policy", json.dumps(policy))
+            log(f"trade bench: {len(added)} rules added for testing")
+        if bank and bank.fresh and feats:
+            recent = st.tpath(now - (C.MODELS["seq_steps"] + 2) * 1800)      # the LSTM reads each coin's last scans
+            seqs = {m: (recent[m], len(recent[m]) - 1) for m in feats if m in recent}
+            picks = bank.fired(bank.entry_scores(feats, seqs), feats, now, C.MODELS["top_share"])
+        start_all = [pid for pid in exits if not pid.startswith("x:") or pid in loaded_x]
+        start_model = sorted({policy["exit"] if policy["exit"] in exits else C.DEFAULT_EXIT} | loaded_x)
         busy, held = st.busy_rules(now, cfg["reentry_h"]), st.live_open_mints()
         for mint, f in feats.items():
             d = by[mint]["d"]
             for rule in policy["rules"]:
-                if rule["status"] not in ("testing", "live") or (rule["id"], mint) in busy or not TRD.fires(rule, f):
+                if rule["status"] not in ("testing", "live") or (rule["id"], mint) in busy:
+                    continue
+                mid = rule.get("model")
+                if (mint not in picks.get(mid, {})) if mid else not TRD.fires(rule, f):
                     continue
                 live = rule["status"] == "live" and mint not in held
                 keep = {k: f.get(k) for k in TRD.SHOWN_AT_ENTRY + [c[0] for c in rule["all"]] if f.get(k) is not None}
+                if mid:                        # what the model saw: its score, its threshold, when it was trained
+                    meta = (bank.entry.get(mid) or ({},))[0]
+                    keep.update(sc=LAB._r(picks[mid][mint]), thr=LAB._r(meta.get("thr")), mv=round(bank.summary["trained_at"]))
                 st.add_sig(rule["id"], mint, d.get("symbol") or by[mint]["t"]["symbol"], now, d["price"], d.get("liq"),
-                           d.get("mcap"), keep, policy["exit"], live, TRD.start_states(d["price"], exits))
+                           d.get("mcap"), keep, policy["exit"], live, TRD.start_states(d["price"], start_model if mid else start_all))
                 opened += 1
                 if live:
                     held.add(mint)
     st.prune_tpath(now - cfg["path_days"] * 86400)
-    st.prune_sigs(now - cfg["keep_days"] * 86400)
+    st.prune_sigs(now - cfg["keep_days"] * 86400, now - C.MODELS["keep_trade_days"] * 86400)
     st.commit()
-    log(f"trade ledger: {len(path)} path rows, {len(open_sigs)} open paper trades stepped, {opened} opened")
-    return policy, feats, changes
+    log(f"trade ledger: {len(path)} path rows, {len(open_sigs)} open paper trades stepped, {opened} opened"
+        + (f"; models: {sum(len(v) for v in picks.values())} picks from {len(picks)} models, {len(sells)} exit-model sells"
+           if bank and bank.fresh else ""))
+    return policy, feats, changes, picks, sells
 
 
-def trade_page(st, policy, feats, rows, now):
+def trade_page(st, policy, feats, rows, now, exit_pool=None, picks=None):
     """What the Buy & sell tab shows. Open trades carry their exit levels so the page can flag a sell between scans."""
     if not policy:
         return None
-    cfg, exits = C.TRADE, {e["id"]: e for e in C.EXIT_POOL}
+    cfg, exit_pool, picks = C.TRADE, exit_pool or C.EXIT_POOL, picks or {}
+    exits = {e["id"]: e for e in exit_pool}
+    if policy["exit"] not in exits:            # a live exit model whose models are missing this scan
+        policy = {**policy, "exit": C.DEFAULT_EXIT}
     by = {r["t"]["mint"]: r for r in rows}
     sigs = st.sigs(now - cfg["window_days"] * 86400)
     live_ids = [r["id"] for r in policy["rules"] if r["status"] == "live"]
@@ -1095,21 +1281,22 @@ def trade_page(st, policy, feats, rows, now):
     for r in policy["rules"]:
         since = r.get("since") if r["status"] == "live" else r.get("added")
         fs = TRD.summarise([t for t in fwd.get(r["id"], []) if t["in_ts"] >= (since or 0)])
-        bench.append({k: r.get(k) for k in ("id", "label", "all", "status", "source", "added", "since", "reason", "last", "streak")}
+        bench.append({k: r.get(k) for k in ("id", "label", "all", "status", "source", "added", "since", "reason", "last",
+                                            "streak", "model")}
                      | {"fwd_now": TRD._r(fs), "open": n_open.get(r["id"], 0)})
 
-    # this scan: which coins each rule fires on, and how close the coins come to the rules that matter most
+    # this scan: which coins each rule (or model) fires on, and how close the coins come to the rules that matter most
     firing = defaultdict(list)
     for mint, f in feats.items():
         for r in policy["rules"]:
-            if r["status"] in ("testing", "live") and TRD.fires(r, f):
+            if r["status"] in ("testing", "live") and (TRD.fires(r, f) or mint in picks.get(r.get("model"), {})):
                 firing[mint].append(r["id"])
 
     def score(b):        # the forward record once it has 10 matured trades, else the backtest (as the page ranks them)
         f, bt = b.get("fwd_now") or {}, (b.get("last") or {}).get("bt") or {}
         return f["mean"] if f.get("n", 0) >= 10 else (bt["mean"] if bt.get("n") else None)
-    lead = live_ids or [b["id"] for b in sorted((b for b in bench if b["status"] == "testing" and score(b) is not None),
-                                                key=lambda b: -score(b))[:3]]
+    lead = live_ids or [b["id"] for b in sorted((b for b in bench if b["status"] == "testing" and not b.get("model")
+                                                 and score(b) is not None), key=lambda b: -score(b))[:3]]
     near = []
     for mint, f in feats.items():
         for rid in lead:
@@ -1139,8 +1326,9 @@ def trade_page(st, policy, feats, rows, now):
     cmp_ = TRD.compare_exits(entries, policy["exit"], cfg, exits, now) if entries else {}
     ex = [{"id": e["id"], "label": TRD.exit_label(e), "live": e["id"] == policy["exit"], "now": cmp_.get(e["id"]),
            "last": (policy["exits"].get(e["id"]) or {}).get("last"), "reason": (policy["exits"].get(e["id"]) or {}).get("reason"),
-           "streak": (policy["exits"].get(e["id"]) or {}).get("streak"), "params": {k: v for k, v in e.items() if k not in ("id", "label")}}
-          for e in C.EXIT_POOL]
+           "streak": (policy["exits"].get(e["id"]) or {}).get("streak"), "model": e.get("model"),
+           "params": {k: v for k, v in e.items() if k not in ("id", "label", "algo")}}
+          for e in exit_pool]
 
     labels = {k: (l, u) for k, l, u in TRD.VARIABLES}
     variables = [{"key": k, "label": labels.get(k, (k, ""))[0], "unit": labels.get(k, (k, ""))[1], **v}
@@ -1158,6 +1346,108 @@ def trade_page(st, policy, feats, rows, now):
             "study": C.TRADE_STUDY}
 
 
+ENTRY_KEYS = ("id", "slug", "algo", "family", "kind", "set", "n_vars", "n_test", "auc", "auc_sd", "train_auc", "gap",
+              "accuracy", "balanced_acc", "brier", "logloss", "ic", "picks", "pick_coins", "pick_win", "pick_net", "pick_med",
+              "pick_t", "base_net", "edge", "luck_one", "luck_best", "beats_luck", "thr", "leading", "train_rows",
+              "train_coins", "seconds_wf", "seconds_fit", "error")
+EXIT_KEYS = ("id", "slug", "algo", "family", "n_vars", "decisions", "auc", "train_auc", "gap", "accuracy", "sell_rate",
+             "trades", "net", "base_net", "gain", "gain_t", "early", "thr", "leading", "seconds", "error")
+
+
+def models_page(st, bank, policy, tpage, now, picks, sells):
+    """What the Models tab shows: every model's walk-forward test, its forward paper record under the live exit, the
+    exit models against the live exit on the same trades, and every model trade with its coin and time."""
+    S = (bank.summary if bank else None) or {}
+    out = {"available": MOD is not None, "status": S.get("status") or "waiting for the first training run",
+           "study": C.ML_STUDY, "cfg": {k: C.MODELS[k] for k in ("every_h", "top_share", "exit_thr", "fold_h", "min_samples",
+                                                                   "min_coins", "max_age_h", "luck_draws")},
+           "sets": C.MODEL_SETS}
+    if bank:
+        out.update(fresh=bank.fresh, errors=bank.errors[:20], age_h=round(getattr(bank, "age_h", 0) or 0, 1))
+    for k in ("trained_at", "samples", "coins", "period", "folds", "fold_sizes", "embargo_h", "base_win", "base_net",
+              "base_oos_net", "base_oos_win", "label", "seconds"):
+        out[k] = S.get(k)
+    if not S:
+        return out
+    cfg = C.TRADE
+    exits = {e["id"]: e for e in exit_pool_of(bank)}
+    live_exit = exits.get((policy or {}).get("exit")) or exits[C.DEFAULT_EXIT]
+    rules = {r["id"]: r for r in (policy or {}).get("rules") or []}
+    sigs = [s for s in st.sigs(now - cfg["window_days"] * 86400) if s["rule"].startswith("m:")]
+    by_rule = defaultdict(list)
+    for s in sigs:
+        by_rule[s["rule"]].append(s)
+    entry = []
+    for m in S.get("entry") or []:
+        rid = MOD.rule_id(m["id"]) if MOD else "m:" + m["id"]
+        r, ss = rules.get(rid) or {}, by_rule.get(rid, [])
+        lid = live_exit["id"]
+        done = [{"mint": s["mint"], "ret": s["out"][lid][0], "in_ts": s["in_ts"], "h": s["out"][lid][1]} for s in ss
+                if (s["out"] or {}).get(lid) and TRD.matured(s["in_ts"], live_exit, now)]
+        last = max(ss, key=lambda s: s["in_ts"]) if ss else None
+        entry.append({k: m.get(k) for k in ENTRY_KEYS}
+                     | {"rule": rid, "status": r.get("status"), "verdict": (r.get("last") or {}).get("verdict"),
+                        "streak": r.get("streak"), "since": r.get("added"), "fwd": TRD._r(TRD.summarise(done)),
+                        "trades": len(ss), "open": sum(1 for s in ss if lid not in (s["out"] or {})),
+                        "now": len(picks.get(m["id"], {})),
+                        "last_entry": {"sym": last["sym"], "mint": last["mint"], "ts": last["in_ts"],
+                                       "sc": (last["f"] or {}).get("sc")} if last else None})
+    cmp_ = {e["id"]: e for e in (tpage or {}).get("exits") or []}
+    exit_rows = [{k: e.get(k) for k in EXIT_KEYS} | {"fwd": (cmp_.get(e["id"]) or {}).get("now"),
+                                                     "live": (policy or {}).get("exit") == e["id"]}
+                 for e in S.get("exit") or []]
+    sell_now = defaultdict(list)
+    for sid, pid in sells or ():
+        sell_now[sid].append(pid)
+    log_rows = []
+    for s in sorted(sigs, key=lambda s: -s["in_ts"])[:200]:
+        o = (s["out"] or {}).get(live_exit["id"])
+        row = {"id": s["id"], "ts": s["in_ts"], "sym": s["sym"], "mint": s["mint"], "model": s["rule"][2:],
+               "sc": (s["f"] or {}).get("sc"), "thr": (s["f"] or {}).get("thr"), "mv": (s["f"] or {}).get("mv"),
+               "price": s["in_price"], "mc": s["in_mc"], "liq": s["in_liq"], "live": bool(s["live"])}
+        if o:
+            row.update(ret=o[0], h=o[1], why=o[2], out_ts=o[3])
+        else:
+            last = s.get("last_price") or s["in_price"]
+            row.update(now_net=LAB._r(TRD.net_ret(last / s["in_price"], s["in_liq"], s.get("last_liq"), cfg)),
+                       x_sell=sell_now.get(s["id"], []))
+        x_out = {pid: [v[0], v[3]] for pid, v in (s["out"] or {}).items() if pid.startswith("x:")}
+        if x_out:
+            row["x_out"] = x_out
+        log_rows.append(row)
+    # every sale an exit model made, on any paper trade (rules' and models'), against the live exit on the same trade
+    xlog = []
+    for s in st.sigs(now - cfg["window_days"] * 86400):
+        for pid, v in (s["out"] or {}).items():
+            if pid.startswith("x:") and v[2] == "model said sell":
+                ref = (s["out"] or {}).get(live_exit["id"])
+                xlog.append({"ts": v[3], "sym": s["sym"], "mint": s["mint"], "model": pid, "rule": s["rule"], "in_ts": s["in_ts"],
+                             "h": v[1], "ret": v[0], "price": v[4], "live_ret": ref[0] if ref else None})
+    xlog.sort(key=lambda x: -x["ts"])
+    out.update(entry=entry, exit=exit_rows, log=log_rows, exit_log=xlog[:150], exit_sells=len(xlog),
+               live_exit={"id": live_exit["id"], "label": TRD.exit_label(live_exit)}, trades_total=len(sigs))
+    return out
+
+
+def corr_page(st, now):
+    """The Correlations tab, worked out at most once every CORR["every_min"] minutes and kept in the database between."""
+    last = st.get_meta("corr")
+    if last:
+        try:
+            doc = json.loads(last)
+            if now - doc.get("ts", 0) < C.CORR["every_min"] * 60 - 120:
+                return doc
+        except ValueError:
+            pass
+    t0 = time.time()
+    doc = CORR.analyse(st.tpath(now - C.TRADE["path_days"] * 86400), now, C.CORR)
+    doc["seconds"] = round(time.time() - t0, 1)
+    st.set_meta("corr", json.dumps(clean(doc), separators=(",", ":")))
+    st.commit()
+    log(f"correlations: {doc['points']} hourly readings on {doc['coins']} coins in {doc['seconds']}s")
+    return doc
+
+
 def backfill(st):
     """Start trackers for tokens that entered before the tracker existed."""
     for mint, ts, price, mcap, n in st.first_entry_backfill():
@@ -1171,9 +1461,9 @@ def run(args):
         C.SCAN_MINUTES = args.cadence          # shown on the page: how often the scheduler runs this scan
     st = Store(args.db)
     backfill(st)
-    jcache = {}
+    jcache, lists = {}, {}
     if not args.no_discovery:
-        discover(st, now, jcache)
+        _seen, lists = discover(st, now, jcache)
     toks = st.universe(now - C.UNIVERSE_TTL_DAYS * 86400)
     log(f"universe: {len(toks)} tokens")
     ds_all = S.ds_tokens([t["mint"] for t in toks])
@@ -1182,26 +1472,40 @@ def run(args):
     sol = S.ds_tokens([C.SOL_MINT]).get(C.SOL_MINT) or {}
     policy = json.loads(st.get_meta("policy") or "null")
     crowd = COM.crowd() if COM.enabled() else {}
-    rows, handles, events, status = process(st, now, toks, args.max_enrich, ds_all, jcache, policy, crowd)
+    rows, handles, events, status = process(st, now, toks, args.max_enrich, ds_all, jcache, policy, crowd, lists)
     regime = regime_of(rows, (sol.get("chg") or {}).get("h24"))
     n_obs = observe(st, rows, now, regime)
     log(f"lab: {n_obs} observations recorded, {n_up} open ones updated")
     policy, gmeta, changes = weekly_review(st, rows, now, policy)
-    tpolicy, tfeats, tchanges = trade_step(st, rows, ds_all, now, regime)
+    policy = add_attention_candidates(st, policy, now)
+    bank = MOD.Bank(args.models, now, C.MODELS["max_age_h"]) if MOD and getattr(args, "models", None) else None
+    if bank:
+        log(f"models: {'none trained yet' if not bank.summary else bank.summary.get('status')}"
+            + (f"; {len(bank.entry)} entry and {len(bank.exit)} exit models loaded, trained {bank.age_h:.1f}h ago"
+               + ("" if bank.fresh else " (too old to trade)") if bank.summary and bank.summary.get('status') == 'ok' else "")
+            + (f"; failed to load: {', '.join(bank.errors[:5])}" if bank.errors else ""))
+    tpolicy, tfeats, tchanges, picks, sells = trade_step(st, rows, ds_all, now, regime, bank)
     rate = base_rug_rate(st, now)
     community = COM.sync(rows, ds_all, now, rate) if COM.enabled() else "off: no SUPABASE_SECRET_KEY"
     log("community: " + community)
     snapshot_tracked(st, rows, ds_all, jcache, now)
-    st.prune(now - C.SNAP_KEEP_H * H, now - C.TG_KEEP_DAYS * 86400); st.commit()
+    st.prune(now - C.SNAP_KEEP_H * H, now - C.TG_KEEP_DAYS * 86400)
+    if now - float(st.get_meta("attn_pruned") or 0) >= 86400:
+        log(f"attention: {st.prune_attention(now - C.ATTN['keep_days'] * 86400)} stale records thinned")
+        st.set_meta("attn_pruned", now)
+    st.commit()
     meta = {"universe": len(toks), "priced": len(ds_all), "candidates": len(rows), "seconds": round(time.time() - t0),
-            "sources": ["GeckoTerminal", "DEX Screener", "Jupiter", "Solana RPC", "RugCheck", "Telegram public pages"],
-            "source_status": status}
+            "sources": ["GeckoTerminal", "DEX Screener", "Jupiter", "Solana RPC", "RugCheck", "Telegram public pages",
+                        "fxtwitter (X followers)", "RDAP (domain records)"],
+            "source_status": status, "trending": {k: len(v) for k, v in lists.items()}}
     meta["review"] = REV.for_page(policy, gmeta)
     meta["call_base_rate"] = round(COM.base_rate(rate), 4)       # what rug calls are scored against (see community.py)
     meta["call_base_rate_measured"] = rate is not None             # False: the default, until a fortnight has settled
     meta["community"] = community
-    tpage = trade_page(st, tpolicy, tfeats, rows, now)
+    tpage = trade_page(st, tpolicy, tfeats, rows, now, exit_pool_of(bank), picks)
     meta["trade"] = tpage
+    meta["models"] = models_page(st, bank, tpolicy, tpage, now, picks, sells)
+    meta["corr"] = corr_page(st, now)
     doc = export(st, rows, handles, now, meta, args.out)
     write_csv(os.path.join(os.path.dirname(os.path.abspath(args.out)), "tracker.csv"), tracker_rows(st, rows, now))
     st.close()
@@ -1236,6 +1540,7 @@ if __name__ == "__main__":
     a = sub.add_parser("run"); a.add_argument("--db", default="undertow.db"); a.add_argument("--out", default="data.json")
     a.add_argument("--max-enrich", type=int, default=80); a.add_argument("--no-discovery", action="store_true")
     a.add_argument("--cadence", type=int, default=None, help="minutes between scheduled runs, shown on the page")
+    a.add_argument("--models", default=MODELS_DIR, help="folder the training job (undertow.train) writes the models to")
     b = sub.add_parser("inspect"); b.add_argument("mint"); b.add_argument("--db", default="undertow.db")
     args = ap.parse_args()
     run(args) if args.cmd == "run" else inspect(args)

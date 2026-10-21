@@ -57,7 +57,7 @@ EXIT_SLACK = {
 # Polite client pacing (seconds between calls per host). GeckoTerminal's free tier returned 429
 # after about 15 calls in a few seconds, consistent with its published ~30 calls a minute.
 PACE = {"geckoterminal": 2.2, "dexscreener": 1.1, "rugcheck": 1.1, "telegram": 0.8, "jupiter": 2.1, "rpc": 0.6,
-        "goplus": 1.0}
+        "goplus": 1.0, "fxtwitter": 1.0, "vxtwitter": 1.0, "rdap": 1.0}
 # Solana's public RPC answers mint lookups (authorities, Token-2022 extensions) for free. Set SOLANA_RPC_URL to a
 # free Helius or other endpoint for higher limits.
 RPC_URL = "https://api.mainnet-beta.solana.com"
@@ -253,7 +253,7 @@ TG_KEEP_DAYS = 8                  # Telegram member counts, for growth rates
 # the path is kept path_days, and paper trades keep_days (the live rules' trades for good).
 TRADE = {"usd": 500, "fee_pct": 1.0, "reentry_h": 24, "follow_h": 48, "max_miss": 3, "liq_pull": 0.5,
          "path_days": 14, "window_days": 28, "keep_days": 60, "every_days": 7, "min_trades": 30, "min_edge": 1.0, "z": 2.0,
-         "promote_after": 2, "retire_after": 2, "max_promotions": 1, "max_live": 2, "testing": 24, "add_per_review": 4,
+         "promote_after": 2, "retire_after": 2, "max_promotions": 1, "max_live": 2, "testing": 40, "add_per_review": 4,
          "stale_after": 6, "retest_after_days": 56, "switch_min_gain": 1.0, "switch_after": 2,
          "var_min_n": 300, "var_min_rho": 0.05, "var_retire_after": 3, "warn_gap": 2.0}
 
@@ -336,6 +336,15 @@ SELL_WARNINGS = [
     {"id": "hot_hour", "label": "Up 20% or more in the last hour", "all": [["c1h", ">=", 20]]},
     {"id": "pushed_turning", "label": "Up 30% or more from its 6h low, and down since the last scan",
      "all": [["ru6", ">=", 30], ["r15", "<", 0]]},
+    # attention (added 21 Oct 2026): is peak attention, or attention someone paid for, followed by falls?
+    {"id": "boost_bought", "label": "DEX Screener boosts bought in the last hour", "all": [["bst_d1h", ">=", 1]]},
+    {"id": "ad_bought", "label": "DEX Screener ad paid in the last 3 hours", "all": [["ad_new", ">=", 1]]},
+    {"id": "trend_peak", "label": "Top 5 on GeckoTerminal's 5-minute trending list after a 30%+ push",
+     "all": [["gtr5", ">=", 16], ["ru6", ">=", 30]]},
+    {"id": "jup_trend_pushed", "label": "Top 20 on Jupiter's 1h trending list after a 30%+ push",
+     "all": [["jtr", ">=", 81], ["ru6", ">=", 30]]},
+    {"id": "x_spike", "label": "X followers jumping: last hour's growth 2+ points an hour above the day's",
+     "all": [["xf_spike", ">=", 2]]},
 ]
 # What the candle study behind the first bench found, shown on the Buy & sell tab. Replayed on GeckoTerminal's
 # 5-minute candles for every coin the scanner had seen in range, each from the moment the scanner first saw it, priced
@@ -359,5 +368,99 @@ TRADE_STUDY = {
         "below the peak (-7.2%) still trailed the target: at one price every 15 minutes, a stop fills after the drop.",
         "One market: the coins in range fell 13% on average over 24 hours in this window. Rules that lost here could "
         "work in a rising market, which is why the bench keeps testing them forward.",
+    ],
+}
+
+# ---- Attention (added 21 Oct 2026; undertow/attention.py lists the sources and what each variable means) ---------
+# Visitor counts for a project's website, X account or DEX Screener page are not published anywhere, so attention is
+# read from what is public: paid DEX Screener boosts, ads, profiles and community takeovers; the trending ranks of
+# GeckoTerminal (ranked partly on visits to its own pages) and Jupiter; X followers through a free mirror; Telegram
+# members; and the age of the website's domain. Boosts and trending ranks come every scan for every candidate. The rest
+# are read for coins inside the screener or close to passing: DEX Screener orders every orders_ttl_h hours, X hourly
+# for coins inside (x_ttl_h for the others), a domain once (again after web_retry_days if the lookup failed), all
+# within per-run budgets so a scan stays inside free limits.
+ATTN = {"orders_ttl_h": 3, "orders_budget": 30, "x_ttl_h_in": 1, "x_ttl_h": 3, "x_budget": 40, "web_retry_days": 7,
+        "web_budget": 15, "gt_pages_1h": 2, "gt_pages_5m": 1, "keep_days": 3}
+# Candidate gates on attention, tested from the scan the data starts (outside the weekly intake, so the record starts
+# now) and judged like every candidate: among coins passing every gate, did the ones a rule would remove rug more often?
+ATTENTION_CANDIDATES = [
+    ("attn_trending", "On GeckoTerminal's 1h trending list", "gtr", ">=", 1),
+    ("attn_jup_trending", "On Jupiter's 1h trending list", "jtr", ">=", 1),
+    ("attn_no_boost", "No paid DEX Screener boosts running", "bst", "<=", 0),
+    ("attn_profile", "Paid for a DEX Screener profile", "dsp", ">=", 1),
+    ("attn_links_2", "At least 2 links on its DEX Screener profile", "nlinks", ">=", 2),
+    ("attn_x_1k", "At least 1,000 X followers", "xf", ">=", 1000),
+    ("attn_x_growing", "X followers not falling over 6h", "xfg", ">=", 0),
+    ("attn_tg_online", "At least 2% of Telegram members online", "tgo", ">=", 0.02),
+    ("attn_domain_30d", "Website domain registered at least 30 days ago", "web_age", ">=", 30),
+    ("attn_own_domain", "Website on its own domain, not a free host or link page", "web_free", "<=", 0),
+    ("attn_domain_new", "Website domain bought for the launch, not older than the coin", "web_new", ">=", 1),
+]
+# Entry rules on attention, put on the Buy & sell bench the scan the data starts (outside the weekly intake).
+ATTENTION_RULES = [
+    _rule("trending_unpushed", "On GeckoTerminal's 1h trending list, not pushed (under 20% off its 6h low)",
+          ("gtr", ">=", 1), ("ru6", "<", 20)),
+    _rule("trend_new", "Joined GeckoTerminal's 1h trending list in the last hour, under 30% off its 6h low",
+          ("trend_new", ">=", 1), ("ru6", "<", 30)),
+    _rule("hot_5m_unpushed", "Top 10 on GeckoTerminal's 5-minute trending list, under 25% off its 6h low",
+          ("gtr5", ">=", 11), ("ru6", "<", 25)),
+    _rule("jup_trending_liquid", "Top 50 on Jupiter's 1h trending list, liquidity $50k+, not pushed",
+          ("jtr", ">=", 51), ("liq", ">=", 50_000), ("ru6", "<", 20)),
+    _rule("boosted_unpushed", "Paid DEX Screener boosts running, not pushed", ("bst", ">=", 1), ("ru6", "<", 15)),
+    _rule("fresh_boost", "Boosts bought in the last hour, under 25% off its 6h low", ("bst_d1h", ">=", 1), ("ru6", "<", 25)),
+    _rule("fresh_ad", "DEX Screener ad paid in the last 3h, under 25% off its 6h low", ("ad_new", ">=", 1), ("ru6", "<", 25)),
+    _rule("x_growing", "X followers growing 0.5%+ an hour over 6h, 1,000+ followers, not pushed",
+          ("xfg", ">=", 0.5), ("xf", ">=", 1000), ("ru6", "<", 20)),
+    _rule("x_spike", "X followers jumping (last hour's growth 1+ point an hour above the day's), under 25% off its 6h low",
+          ("xf_spike", ">=", 1), ("ru6", "<", 25)),
+    _rule("tg_growing", "Telegram members growing 1%+ an hour, not pushed", ("tgg", ">=", 1), ("ru6", "<", 20)),
+    _rule("quiet_liquid", "No attention: not trending on GeckoTerminal or Jupiter, no boosts, liquidity $100k+, not pushed",
+          ("gtr", "<=", 0), ("jtr", "<=", 0), ("bst", "<=", 0), ("liq", ">=", 100_000), ("ru6", "<", 15)),
+    _rule("own_domain_old", "Website on its own domain registered 30+ days ago, not pushed",
+          ("web_free", "<=", 0), ("web_age", ">=", 30), ("ru6", "<", 15)),
+    _rule("cto_liquid", "Community takeover on DEX Screener, liquidity $50k+, not pushed",
+          ("cto", ">=", 1), ("liq", ">=", 50_000), ("ru6", "<", 15)),
+]
+
+# ---- Correlations (added 21 Oct 2026; undertow/corr.py) ---------------------------------------------------------
+# Worked out once an hour from the Buy & sell path (every scan's reading of every coin passing every gate), one
+# reading per coin per hour, so a coin's minute-by-minute readings do not count as independent evidence.
+CORR = {"every_min": 60, "horizons_h": (1, 4, 12), "min_n": 200, "min_coins": 20, "z": 2.0, "min_rho": 0.05}
+
+# ---- Models (added 21 Oct 2026; undertow/models.py says how they are trained and tested) ---------------------------
+# A separate job (.github/workflows/train.yml) retrains every model every_h hours from the Buy & sell path; the scan
+# scores every coin passing every gate with the latest models and opens a paper trade when a score is in the top
+# top_share of what the training data scored. Walk-forward: test windows of at least fold_h hours tile the later half
+# of the history, each trained only on trades that had closed before it opened (purging), so no training label reaches
+# into a test window. Training starts at min_samples labelled samples on min_coins coins. The models' settled paper
+# trades are kept keep_trade_days (they far outnumber the rules'); the training history keep_days.
+MODELS = {"every_h": 6, "min_samples": 1200, "min_coins": 40, "fold_h": 8, "min_train": 400, "min_test": 100,
+          "keep_days": 60, "top_share": 0.2, "luck_draws": 200, "exit_every": 2, "max_exit_rows": 60_000,
+          "seq_steps": 8, "max_age_h": 30, "exit_thr": 0.5, "keep_trade_days": 28}
+# The variable sets every algorithm is trained on, so the page can show what each set adds.
+MODEL_SETS = {"all": "every variable", "no_attention": "every variable except attention",
+              "attention_price": "attention and the price path only"}
+# What the offline study of the algorithms found before the first training run (tools/study/study_ml.py), shown on the
+# Models tab.
+ML_STUDY = {
+    "period": "18 Oct 2026 16:45 to 20 Oct 2026 20:15 UTC",
+    "sample": "7,476 sample entries on 419 coins (each coin's first reading in each hour) replayed on GeckoTerminal's "
+              "5-minute candles, in 4 walk-forward folds; 44% of the sample trades made money after costs, averaging "
+              "-5.3%. Attention was not recorded yet, so the study used the market and price variables only",
+    "findings": [
+        "The models found ranking signal that random scores did not: random forest ranked winners above losers with an "
+        "out-of-sample AUC of 0.673, gradient boosting, XGBoost and LightGBM 0.666-0.667 and logistic regression 0.627, "
+        "against 0.498 for random scores.",
+        "None of it paid after costs. Every model's top fifth of picks still lost money on average: gradient boosting "
+        "-3.7% a trade and random forest -4.5%, against -5.1% for all test trades. Models of the return itself came "
+        "closest: random forest on returns averaged -0.7% on 1,173 trades (t -1.1), still a loss.",
+        "Boosted trees overfit most: training AUCs of 0.89-0.97 against about 0.67 out of sample, which is why every tree "
+        "model here is shallow with large leaves. k nearest neighbours memorised its training set (training AUC 1.000) "
+        "and made no picks out of sample; naive Bayes, the neural network and the LSTM ranked worse (0.56-0.60).",
+        "Exit models did not beat a +10% target sold within 8 hours: following them changed the average by -0.20 to "
+        "+0.18 points a trade (t under 1) on 5,989 trades.",
+        "So ranking beats chance, but the edge found so far is smaller than the 4-5% a round trip costs at $500. A model "
+        "earns a live signal only if its forward picks clear those costs; on this evidence the likeliest result is that "
+        "they will not, and the tab will show it either way.",
     ],
 }
