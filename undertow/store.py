@@ -39,6 +39,11 @@ CREATE TABLE IF NOT EXISTS tsig(id INTEGER PRIMARY KEY AUTOINCREMENT, rule TEXT,
   miss INTEGER DEFAULT 0, last_price REAL, last_liq REAL, done INTEGER DEFAULT 0, ref_out_ts REAL);
 CREATE INDEX IF NOT EXISTS ix_tsig_open ON tsig(done, mint);
 CREATE INDEX IF NOT EXISTS ix_tsig_rule ON tsig(rule, mint);
+CREATE TABLE IF NOT EXISTS tick(ts REAL, mint TEXT, price REAL, liq REAL, mc REAL, v5 REAL, v1h REAL, b5 INTEGER,
+  s5 INTEGER, c5 REAL, c1h REAL, bst INTEGER, gtr5 INTEGER);
+CREATE INDEX IF NOT EXISTS ix_tick_ts ON tick(ts);
+CREATE TABLE IF NOT EXISTS feed(ts REAL, mint TEXT, kind TEXT, amount REAL, total REAL, impressions REAL, at REAL);
+CREATE INDEX IF NOT EXISTS ix_feed ON feed(mint, ts);
 """
 # tpath states: I passed every gate, W on watch (failing a soft gate once), E entering, O out, X failed a structure
 # gate this scan, G not a candidate this scan (out of range or unpriced: price only)
@@ -308,6 +313,113 @@ class Store:
                 self.db.execute("UPDATE tokens SET attn_json=? WHERE mint=?", (json.dumps(keep) if keep else None, r[0]))
                 n += 1
         return n
+
+    # ---- minute data (fast.py): one reading a minute for the watched coins, and DEX Screener's boosts and ads feeds --
+    def add_ticks(self, rows):
+        from .minute import TICK_COLS
+        self.db.executemany(f"INSERT INTO tick({','.join(TICK_COLS)}) VALUES({','.join('?' * len(TICK_COLS))})",
+                            [tuple(r.get(c) for c in TICK_COLS) for r in rows])
+
+    def ticks(self, since, until=None, mints=None):
+        """Minute readings in time order (dicts), since `since` (exclusive) and up to `until` (inclusive)."""
+        q, a = "SELECT * FROM tick WHERE ts>?", [since]
+        if until is not None:
+            q += " AND ts<=?"
+            a.append(until)
+        if mints is not None:
+            mints = list(mints)
+            if not mints:
+                return []
+            q += f" AND mint IN ({','.join('?' * len(mints))})"
+            a += mints
+        return [dict(r) for r in self.db.execute(q + " ORDER BY ts, mint", a)]
+
+    def ticks_by_coin(self, since, mints=None):
+        """Each coin's minute readings since `since`, one coin at a time: yields (mint, [dict]) in mint order, so a long
+        window never sits in memory at once."""
+        q, a = "SELECT * FROM tick WHERE ts>?", [since]
+        if mints is not None:
+            mints = sorted(mints)
+            if not mints:
+                return
+            q += f" AND mint IN ({','.join('?' * len(mints))})"
+            a += mints
+        cur, rows = None, []
+        for r in self.db.execute(q + " ORDER BY mint, ts", a):
+            if r["mint"] != cur:
+                if rows:
+                    yield cur, rows
+                cur, rows = r["mint"], []
+            rows.append(dict(r))
+        if rows:
+            yield cur, rows
+
+    def add_feeds(self, rows):
+        """Feed entries (ts, mint, kind, amount, total, impressions, at); an entry already stored is skipped."""
+        for r in rows:
+            ts, mint, kind, amount, total, imp, at = r
+            if self.db.execute("SELECT 1 FROM feed WHERE mint=? AND kind=? AND COALESCE(at,0)=COALESCE(?,0) "
+                               "AND COALESCE(total,0)=COALESCE(?,0) AND COALESCE(impressions,0)=COALESCE(?,0) LIMIT 1",
+                               (mint, kind, at, total, imp)).fetchone():
+                continue
+            self.db.execute("INSERT INTO feed VALUES(?,?,?,?,?,?,?)", r)
+
+    def feeds(self, since):
+        return [tuple(r) for r in self.db.execute("SELECT ts, mint, kind, amount, total, impressions, at FROM feed "
+                                                  "WHERE ts>=? ORDER BY ts", (since,))]
+
+    def tick_stats(self):
+        r = self.db.execute("SELECT COUNT(*), MIN(ts), MAX(ts), COUNT(DISTINCT mint) FROM tick").fetchone()
+        return {"rows": r[0], "since": r[1], "last": r[2], "coins": r[3]}
+
+    def prune_ticks(self, ticks_before, feeds_before):
+        self.db.execute("DELETE FROM tick WHERE ts<?", (ticks_before,))
+        self.db.execute("DELETE FROM feed WHERE ts<?", (feeds_before,))
+
+    def scan_passing(self, before):
+        """The latest scan before `before` (from the path): its time and {mint: the variables the rules read} for every
+        coin that passed every gate at it. (None, {}) when the path is empty."""
+        r = self.db.execute("SELECT MAX(ts) FROM tpath WHERE ts<?", (before,)).fetchone()
+        if not r or r[0] is None:
+            return None, {}
+        rows = self.db.execute("SELECT mint, f FROM tpath WHERE ts=? AND st='I'", (r[0],))
+        return r[0], {x[0]: json.loads(x[1]) if x[1] else {} for x in rows}
+
+    def passing_sets(self, since):
+        """[(scan time, {mints that passed every gate})] ascending, for every scan since `since`."""
+        out = {}
+        for ts, mint, st in self.db.execute("SELECT ts, mint, st FROM tpath WHERE ts>=? ORDER BY ts", (since,)):
+            s = out.setdefault(ts, set())
+            if st == "I":
+                s.add(mint)
+        return sorted(out.items())
+
+    def fast_last(self, rules):
+        """{(rule, mint): (latest entry time, whether a trade of the pair is still open under its rule's exit)} for the
+        given rules: what decides whether a quick rule may buy the coin again."""
+        rules = list(rules)
+        if not rules:
+            return {}
+        q = (f"SELECT rule, mint, MAX(in_ts), SUM(ref_out_ts IS NULL) FROM tsig WHERE rule IN ({','.join('?' * len(rules))}) "
+             "GROUP BY rule, mint")
+        return {(r[0], r[1]): (r[2], bool(r[3])) for r in self.db.execute(q, rules)}
+
+    def insert_sig(self, s):
+        """A paper trade worked out in full elsewhere (the minute ledger): every column at once. Returns its id."""
+        sid = self.add_sig(s["rule"], s["mint"], s.get("sym"), s["in_ts"], s["in_price"], s.get("in_liq"), s.get("in_mc"),
+                           s.get("f") or {}, s["ref"], s.get("live"), s.get("st") or {})
+        self.update_sig(sid, s.get("out") or {}, s.get("st") or {}, s.get("miss") or 0, s.get("last_price"),
+                        s.get("last_liq"), s.get("done"), s.get("ref_out_ts"))
+        return sid
+
+    def watch_list(self, since):
+        """Coins the minute sampler reads: inside the screener or entering, passing at some scan since `since`, or
+        holding an open paper trade; coins inside first."""
+        inside = [r[0] for r in self.db.execute("SELECT mint FROM tokens WHERE status='IN' OR pass_streak>0 "
+                                                "ORDER BY status='IN' DESC, mint")]
+        recent = [r[0] for r in self.db.execute("SELECT DISTINCT mint FROM tpath WHERE ts>=? AND st IN ('I','W')", (since,))]
+        held = [r[0] for r in self.db.execute("SELECT DISTINCT mint FROM tsig WHERE done=0")]
+        return list(dict.fromkeys(inside + held + recent))
 
     def live_open_mints(self):
         return {r[0] for r in self.db.execute("SELECT DISTINCT mint FROM tsig WHERE live=1 AND ref_out_ts IS NULL")}

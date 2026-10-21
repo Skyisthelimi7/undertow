@@ -60,10 +60,25 @@ function render(){
     +'<div class="seg" role="group" aria-label="Sort by">'+cols.map(function(c){return '<button type="button" data-csort="'+c[0]+'" aria-pressed="'+(st.sort===c[0])+'">'+esc(c[1].replace('Predicts: next ','Next '))+'</button>';}).join('')+'</div></div>'
     +'<div class="tscroll"><table class="grid lab corrgrid cards"><thead>'+head+'</thead><tbody>'+rows.join('')+'</tbody></table></div>'
     +'<p class="fine">The sample is every reading the Buy &amp; sell ledger keeps (coins passing every gate, '+int(((D.trade||{}).cfg||{}).path_days||14)+' days), thinned to one reading per coin per hour. A correlation is shown once '+int(200)+' readings have it. Price-derived variables (recent changes, distance from highs and lows, and liquidity and its ratios, since half a pool is the coin itself) move with the price by construction, so “moves with the price” is left blank for them. Correlation is not a trading rule: the Buy &amp; sell and Models tabs test what trading on a variable would have returned after costs.</p>';
+  w.insertAdjacentHTML('beforeend',minuteSec(K.minute));
   $$('[data-cgroup]',w).forEach(function(b){b.onclick=function(){st.group=b.dataset.cgroup;save();render();};});
   $$('[data-csort]',w).forEach(function(b){b.onclick=function(){st.sort=b.dataset.csort;save();render();};});
 }
 function kpi(k,v,s){return '<div class="kpi"><div class="k">'+k+'</div><div class="v">'+v+'</div><div class="s">'+s+'</div></div>';}
+
+/* the minute data against the next 5, 15 and 30 minutes (corr.analyse_fast): what quick rules bet on */
+function minuteSec(M){
+  if(!M)return '';
+  var hz=M.horizons_min||[5,15,30],mid=String(hz[1]);
+  var vs=(M.vars||[]).slice().sort(function(a,b){var x=((a.predicts||{})[mid]||{}).rho,y=((b.predicts||{})[mid]||{}).rho;return (y==null?-1:Math.abs(y))-(x==null?-1:Math.abs(x))||(b.n||0)-(a.n||0);});
+  var hold=0;vs.forEach(function(v){hz.forEach(function(h){if(((v.predicts||{})[String(h)]||{}).verdict==='holds')hold++;});});
+  var rows=vs.map(function(v){var p=(v.predicts||{})[mid]||{};
+    return '<tr><td class="l"><b>'+esc(v.label)+'</b></td><td data-label="Readings">'+int(v.n||0)+'</td>'+hz.map(function(h){return cell((v.predicts||{})[String(h)],'Predicts: next '+h+' min');}).join('')
+      +'<td class="l" data-label="Verdict, next '+mid+' min">'+vchip(p.verdict||(v.n>=200?'weak':'collecting'))+'</td></tr>';});
+  return '<section class="lab-sec" id="cr-minute"><h3>The minute data: the next 5, 15 and 30 minutes</h3>'
+    +'<p class="trk-note">The same test on the minute readings taken while each scan runs, for the bets quick rules make: each variable’s level against the price change over the next '+hz.join(', ').replace(/, (\d+)$/,' and $1')+' minutes. '+int(M.points||0)+' readings on '+int(M.coins||0)+' coins'+(M.since?' since '+esc(utc(M.since)):'')+', one per coin every '+int(M.every_min||15)+' minutes, on coins that passed every gate at the scan before (the gates a quick rule could have known); '+int(hold)+' variable and horizon pairs hold so far. Over minutes, price noise and the cost of a round trip both loom larger, so a correlation that holds here still has to pay its fees on the Buy &amp; sell tab.</p>'
+    +'<div class="tscroll"><table class="grid lab corrgrid cards"><thead><tr><th class="l">Variable</th><th>Readings</th>'+hz.map(function(h){return '<th>Predicts: next '+h+' min</th>';}).join('')+'<th class="l">Next '+mid+' min</th></tr></thead><tbody>'+rows.join('')+'</tbody></table></div></section>';
+}
 
 U.on('data',function(){if(U.view()==='corr')render();});
 U.on('view',function(v){if(v==='corr')render();});

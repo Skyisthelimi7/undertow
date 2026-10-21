@@ -35,8 +35,8 @@ def review(changes):
 
 
 def trade(changes, page, now):
-    """Live paper trades opened or closed by this scan, and the trade review's changes (a rule going live or retiring,
-    the exit switching). Rules still under test never alert."""
+    """Live paper trades opened by this scan, and the trade review's changes (a rule going live or retiring, the exit
+    switching). Rules still under test never alert. Sales alert as they happen (closes, minute)."""
     page = page or {}
     out = []
     fresh = [x for x in page.get("open") or [] if abs(x["in_ts"] - now) < 1]
@@ -50,12 +50,35 @@ def trade(changes, page, now):
         out.append(f"UNDERTOW · buy signal (paper): {x['sym']} at {x['in_price']:.4g}, {_usd(x.get('in_mc'))} market cap"
                    f"\nRule: {x['rule']}; exit: {page.get('exit', {}).get('label', '')}{stop}"
                    f"\nhttps://dexscreener.com/solana/{x['mint']}\nA rule's paper record, not a recommendation. Most memecoins go to zero.")
-    for x in page.get("closed") or []:
-        if abs(x["out_ts"] - now) < 1:
-            out.append(f"UNDERTOW · sell signal (paper): {x['sym']} {x['why']} after {x['h']:.1f}h, {x['ret']:+.1f}% after costs"
-                       f"\nhttps://dexscreener.com/solana/{x['mint']}")
     out += [f"UNDERTOW · trade review: {c['what']} {c['label']}\n{c['reason']}" for c in changes or [] if c["what"] != "testing"]
     _post(out)
+
+
+def _held(h):
+    return f"{h * 60:.0f} min" if h < 1 else f"{h:.1f}h"
+
+
+def _sell(s, o):
+    return (f"UNDERTOW · sell signal (paper): {s.get('sym') or s['mint'][:6]} {o[2]} after {_held(o[1])}, "
+            f"{o[0]:+.1f}% after costs\nhttps://dexscreener.com/solana/{s['mint']}")
+
+
+def closes(closed):
+    """Live paper trades just closed under the policy that governs them: [(trade, [net, hours, reason, ts, price])]."""
+    _post([_sell(s, o) for s, o in closed or []])
+
+
+def minute(kind, s, info, exits):
+    """A live paper trade opened or closed between scans, on the minute data, sent as it happens. kind "buy": info is
+    the quick rule; kind "sell": info is the trade's result under its governing policy."""
+    if kind == "sell":
+        _post([_sell(s, info)])
+        return
+    pol = exits.get(s["ref"]) or {}
+    from .trade import exit_label            # notify stays importable on its own
+    _post([f"UNDERTOW · quick buy signal (paper): {s.get('sym') or s['mint'][:6]} at {s['in_price']:.4g}, "
+           f"{_usd(s.get('in_mc'))} market cap\nRule: {info.get('label', info.get('id'))}\nExit: {exit_label(pol) if pol else s['ref']}"
+           f"\nhttps://dexscreener.com/solana/{s['mint']}\nA rule's paper record, not a recommendation. Most memecoins go to zero."])
 
 
 def _post(texts):

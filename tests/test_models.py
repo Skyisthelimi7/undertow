@@ -244,7 +244,7 @@ class ScanSide(unittest.TestCase):
             from test_trade import fake_row
             rows = [fake_row(m, 1.0) for m in ("A", "B")]
             ds = {m: {"price": 1.0, "liq": 2e5, "chg": {"h1": 0.0}} for m in ("A", "B")}
-            pol, feats, ch, picks, sells = SC.trade_step(st, rows, ds, now, {}, bank)
+            pol, feats, ch, picks, sells, _minute, _closed = SC.trade_step(st, rows, ds, now, {}, bank)
             self.assertTrue(any(r["id"] == "m:logit.all" for r in pol["rules"]))
             self.assertIn("A", picks.get("logit.all", {}))                    # a strong reading scores in the top fifth
             sig = [x for x in st.sigs() if x["rule"] == "m:logit.all"]
@@ -258,6 +258,7 @@ class ScanSide(unittest.TestCase):
             self.assertTrue(any(e["id"] == "logit.all" and e["trades"] == 2 for e in mp["entry"]))
             # next scan: the price falls; the exit model is asked about every open model trade
             ds2 = {m: {"price": 0.97, "liq": 2e5, "chg": {"h1": -3.0}} for m in ("A", "B")}
+            SC.scan_step(st, ds2, now + 900, {e["id"]: e for e in SC.exit_pool_of(bank)}, C.TRADE)
             SC.trade_step(st, [fake_row(m, 0.97) for m in ("A", "B")], ds2, now + 900, {}, bank)
             self.assertTrue(all("x:logit" in x["st"] or "x:logit" in x["out"] for x in st.sigs() if x["rule"] == "m:logit.all"))
         finally:

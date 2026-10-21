@@ -19,7 +19,7 @@ The weekly review reads those records:
 """
 import math, time
 from collections import defaultdict
-from . import lab as LAB, attention as ATT
+from . import lab as LAB, attention as ATT, minute as MIN
 
 H = 3600
 OPS = {">=": lambda a, b: a >= b, ">": lambda a, b: a > b, "<=": lambda a, b: a <= b, "<": lambda a, b: a < b}
@@ -42,7 +42,9 @@ LAB_KEYS = ("c5m", "c1h", "c6h", "c24h", "v5m", "v1h", "v6h", "v24h", "v1h_24", 
             "top10", "exit", "rf", "age", "mc", "liq", "liq_pct", "lfdv", "turn", "dd24s", "mkt1h", "sol24", "mom",
             "tgm", "tgr") + tuple(ATT.KEYS)          # attention (attention.py), from the scan it started being recorded
 _LAB_DEFS = {k: (k, l, u) for k, l, u in LAB.VARIABLES}
-VARIABLES = PATH_VARS + [_LAB_DEFS[k] for k in LAB_KEYS if k in _LAB_DEFS]
+# the minute data's short-window variables (minute.py) come last: quick rules read them at every minute, and the scan
+# records them with each reading too
+VARIABLES = PATH_VARS + [_LAB_DEFS[k] for k in LAB_KEYS if k in _LAB_DEFS] + MIN.VARIABLES
 VAR_KEYS = [v[0] for v in VARIABLES]
 # kept with every paper trade (with the rule's own variables) so the page can say what the coin looked like
 SHOWN_AT_ENTRY = ["mc", "liq", "age", "c1h", "c6h", "c24h", "ru6", "dd6", "vola", "nf1h", "brd1h", "org"]
@@ -146,7 +148,8 @@ def exit_label(p):
         parts.append(f"sell if it falls {p['fade']:g}% in an hour")
     if p.get("sl") is not None:
         parts.append(f"stop at {-p['sl']:g}%")
-    parts.append(f"sell after {p.get('max_h', 24):g}h at the latest")
+    mh = p.get("max_h", 24)
+    parts.append(f"sell after {mh * 60:g} min at the latest" if mh < 1 else f"sell after {mh:g}h at the latest")
     return "; ".join(parts)
 
 
@@ -154,11 +157,12 @@ def new_state(price):
     return {"peak": price, "prev": price}
 
 
-def step(pol, pos, st, price, liq, c1h, now, cfg, guard=None, sell=False):
+def step(pol, pos, st, price, liq, c1h, now, cfg, guard=None, sell=False, tick=False):
     """One scan for one open trade under one exit policy. pos: in_ts, in_price, in_liq. st: {peak, prev}, updated in
     place. guard: a reason to sell at once whatever the policy says. sell: an exit model's call to sell now (for a
-    policy with a model; its target and time limit still apply). Returns None to hold, or (net %, hours held, reason,
-    price)."""
+    policy with a model; its target and time limit still apply). tick: a minute reading between scans rather than a
+    scan's; "cooled off" compares one scan's price with the last, so it is judged at scans only. Returns None to hold,
+    or (net %, hours held, reason, price)."""
     x = price / pos["in_price"]
     st["peak"] = max(st["peak"], price)
     peak_x = st["peak"] / pos["in_price"]
@@ -171,7 +175,7 @@ def step(pol, pos, st, price, liq, c1h, now, cfg, guard=None, sell=False):
             why = "target"
         elif pol.get("trail") is not None and peak_x >= 1 + pol.get("arm", 0) / 100 and price <= st["peak"] * (1 - pol["trail"] / 100):
             why = "trailing stop"
-        elif (pol.get("cool") is not None and peak_x >= 1 + pol["cool"] / 100 and st["prev"]
+        elif (not tick and pol.get("cool") is not None and peak_x >= 1 + pol["cool"] / 100 and st["prev"]
               and price / st["prev"] - 1 <= -pol.get("cool_drop", 5) / 100):
             why = "cooled off"
         elif pol.get("fade") is not None and held >= 1 and c1h is not None and c1h <= -pol["fade"]:
@@ -180,7 +184,8 @@ def step(pol, pos, st, price, liq, c1h, now, cfg, guard=None, sell=False):
             why = "model said sell"
         elif held >= pol.get("max_h", 24) - 0.01:
             why = "time"
-    st["prev"] = price
+    if not tick:
+        st["prev"] = price
     if why is None:
         return None
     return (net_ret(x, pos["in_liq"], liq, cfg), held, why, price)
@@ -220,12 +225,13 @@ def start_states(price, policies):
     return {pid: new_state(price) for pid in policies}
 
 
-def advance(sig, obs, now, policies, cfg):
+def advance(sig, obs, now, policies, cfg, tick=False):
     """Step one paper trade through each exit policy still undecided for it, with this scan's reading of its coin.
     sig: in_ts, in_price, in_liq, out {policy: [net, hours, reason, ts, price]}, st {policy: {peak, prev}} (one entry
     per undecided policy), miss, last_price, last_liq. obs: {price, liq, c1h, hard, xm} or None when nothing prices
     the coin this scan; xm: {policy: True} where an exit model says sell this trade now. A policy no longer on the
-    bench is dropped. Returns (out, st, miss, last_price, last_liq, done)."""
+    bench is dropped. tick: obs is a minute reading between scans (see step). Returns (out, st, miss, last_price,
+    last_liq, done)."""
     out, st = dict(sig.get("out") or {}), {k: dict(v) for k, v in (sig.get("st") or {}).items()}
     miss, lp, ll = sig.get("miss") or 0, sig.get("last_price") or sig["in_price"], sig.get("last_liq") or sig["in_liq"]
     guard = guard_for(obs if obs and obs.get("price") else None, sig, cfg)
@@ -244,11 +250,21 @@ def advance(sig, obs, now, policies, cfg):
         if pol is None:
             st.pop(pid)
             continue
-        r = step(pol, pos, st[pid], price, liq, c1h, now, cfg, guard, bool(xm.get(pid)))
+        r = step(pol, pos, st[pid], price, liq, c1h, now, cfg, guard, bool(xm.get(pid)), tick)
         if r:
-            out[pid] = [LAB._r(r[0]), round(r[1], 2), r[2], now, LAB._r(r[3])]
+            out[pid] = [LAB._r(r[0]), round(r[1], 3), r[2], now, LAB._r(r[3])]
             st.pop(pid)
     return out, st, miss, lp, ll, not st
+
+
+def ref_closed(sig, out, policies, now):
+    """When the trade closed under the policy that governs it (its rule's exit, or the live exit when it opened), or
+    None while still open. A governing policy no longer on the bench counts as closed now."""
+    if sig.get("ref_out_ts") is not None:
+        return sig["ref_out_ts"]
+    if sig["ref"] in out:
+        return out[sig["ref"]][3]
+    return now if sig["ref"] not in policies else None
 
 
 # ---------------------------------------------------------------- backtests on the stored path
@@ -512,6 +528,9 @@ def run_review(policy, path, fwd_by_rule, now, cfg, entry_pool, exit_pool, defau
     def log(what, rid, label, reason):
         changes.append({"ts": now, "what": what, "id": rid, "label": label, "reason": reason})
 
+    def own_exit(r):                       # a rule may name its own exit (quick rules do); else the live one
+        return exits.get(r.get("exit")) or live_exit
+
     # 1. variables: which ones separate risers from fallers among gate-passing coins
     var_recs = []
     for key in VAR_KEYS:
@@ -534,10 +553,12 @@ def run_review(policy, path, fwd_by_rule, now, cfg, entry_pool, exit_pool, defau
         if r["status"] not in ("testing", "live"):
             continue
         since = r.get("since") if r["status"] == "live" else r.get("added")
-        fw = [{"mint": t["mint"], "in_ts": t["in_ts"], "ret": t["out"].get(policy["exit"]), "h": None}
-              for t in fwd_by_rule.get(r["id"], []) if t["in_ts"] >= (since or 0) and matured(t["in_ts"], live_exit, now)]
+        rx = own_exit(r)
+        fw = [{"mint": t["mint"], "in_ts": t["in_ts"], "ret": t["out"].get(rx["id"]), "h": None}
+              for t in fwd_by_rule.get(r["id"], []) if t["in_ts"] >= (since or 0) and matured(t["in_ts"], rx, now)]
         fw = [t for t in fw if t["ret"] is not None]
-        bt = [] if r.get("model") else backtest(path, r, live_exit, cfg)     # a model is judged forward only
+        # models and quick rules (which read minute data the stored path does not hold) are judged forward only
+        bt = [] if r.get("model") or r.get("fast") else backtest(path, r, rx, cfg)
         fs, bs = summarise(fw), summarise(bt)
         h1, h2 = halves(bt)
         verdict, why = judge_rule(fs, bs, cfg, live=r["status"] == "live")
@@ -560,12 +581,17 @@ def run_review(policy, path, fwd_by_rule, now, cfg, entry_pool, exit_pool, defau
             r.update(status="retired", since=now, reason=f"Taken off live on {_day(now)}: {why}.")
             log("retired", r["id"], r["label"], r["reason"])
 
-    # 3. exits: every policy against the live one on the same entries (forward trades, else the backtest's entries)
+    # 3. exits: every policy against the live one on the same entries (forward trades, else the backtest's entries).
+    # Quick rules' trades are left out: the live exit is chosen for the scans' rules, and quick entries are another
+    # population (the Buy & sell tab compares exits on them separately)
     since = now - cfg["window_days"] * 86400
-    entries = pooled({rid: [t for t in lst if t.get("out") and since <= t["in_ts"]] for rid, lst in fwd_by_rule.items()})
+    quick = {r["id"] for r in policy["rules"] if r.get("fast")}
+    entries = pooled({rid: [t for t in lst if t.get("out") and since <= t["in_ts"]] for rid, lst in fwd_by_rule.items()
+                      if rid not in quick})
     basis, at = "forward trades", now
     if sum(1 for e in entries if matured(e["in_ts"], {"max_h": 24}, now)) < cfg["min_trades"]:
-        entries = backtest_entries(path, [r for r in policy["rules"] if r["status"] in ("testing", "live")], exits, cfg)
+        entries = backtest_entries(path, [r for r in policy["rules"] if r["status"] in ("testing", "live")
+                                          and not r.get("fast")], exits, cfg)
         basis, at = "backtest", path_end(path)
     cmp_ = compare_exits(entries, policy["exit"], cfg, exits, at)
     best = None
@@ -590,7 +616,8 @@ def run_review(policy, path, fwd_by_rule, now, cfg, entry_pool, exit_pool, defau
 
     # 4. keep the bench full: the pool first, then rules from variables with a signal, then retired rules due a retest
     have = {r["id"] for r in policy["rules"]}
-    testing = sum(1 for r in policy["rules"] if r["status"] == "testing" and not r.get("model"))   # models have their own bench
+    # models and quick rules have their own benches
+    testing = sum(1 for r in policy["rules"] if r["status"] == "testing" and not r.get("model") and not r.get("fast"))
     room = min(cfg["add_per_review"], max(0, cfg["testing"] - testing)) if policy["last_review"] else cfg["testing"]
     for rule in list(entry_pool) + suggest_rules(var_recs, have, cfg):
         if room <= 0:
@@ -623,7 +650,9 @@ def run_review(policy, path, fwd_by_rule, now, cfg, entry_pool, exit_pool, defau
 
 def backtest_entries(path, rules, exits, cfg):
     """Entries the bench's rules would have made on the stored path, each with its net result under every exit
-    policy, for comparing exits before the forward record is big enough."""
+    policy, for comparing exits before the forward record is big enough. Exits that close within the hour are left
+    out: one price a scan cannot price them."""
+    exits = {pid: pol for pid, pol in exits.items() if pol.get("max_h", 24) >= 1}
     seen, out = set(), []
     longest = {"max_h": max(p.get("max_h", 24) for p in exits.values())}
     for r in rules:

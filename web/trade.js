@@ -37,6 +37,7 @@ function load(){
   (T.exits||[]).forEach(function(e){EX[e.id]=e;});(T.bench||[]).forEach(function(r){RU[r.id]=r;});
   (T.vars||[]).forEach(function(v){VL[v.key]=v;});
   ((D.lab||{}).variables||[]).forEach(function(v){if(!VL[v.key])VL[v.key]=v;});
+  (((T.quick||{}).vars)||[]).forEach(function(v){if(!VL[v.key])VL[v.key]=v;});
   U.prioritise((T.open||[]).map(function(x){return x.mint;}).concat((T.signals||[]).map(function(s){return s.mint;})));
 }
 function liveOf(m){return U.price(m);}
@@ -52,7 +53,7 @@ function sellState(x){
   if(e.trail!=null&&pk/p0>=1+(e.arm||0)/100&&p<=pk*(1-e.trail/100))return ['sell','Trailing stop: '+e.trail+'% below the peak'];
   if(e.cool!=null&&pk/p0>=1+e.cool/100&&x.last_price&&p/x.last_price-1<=-(e.cool_drop||5)/100)return ['sell','Cooling off after a +'+e.cool+'% push'];
   if(e.fade!=null&&held>=1&&q&&q.c1h!=null&&q.c1h<=-e.fade)return ['sell','Fading: '+n1(q.c1h)+' in an hour'];
-  if(held>=maxh)return ['sell','Time limit: '+maxh+'h'];
+  if(held>=maxh)return ['sell','Time limit: '+heldTxt(maxh)];
   var next=[];if(e.sl!=null)next.push('stop '+price(p0*(1-e.sl/100)));if(e.tp!=null)next.push('target '+price(p0*(1+e.tp/100)));
   if(e.trail!=null)next.push(pk/p0>=1+(e.arm||0)/100?'trailing stop '+price(pk*(1-e.trail/100)):'trailing stop arms at '+price(p0*(1+(e.arm||0)/100)));
   next.push('sell by '+when(x.in_ts+maxh*3600));
@@ -71,14 +72,14 @@ function head(){
     +kpi('Record',R.n?pc(R.win*100,0)+' won':'No trades yet',R.n?int(R.n)+' trades, average '+n1(R.mean)+(pnl!=null?'; '+(pnl<0?MINUS:'+')+usd(Math.abs(pnl))+' in all at '+usd(c.usd||500)+' a trade':''):'closed live trades appear here')
     +kpi('Exit',esc(T.exit&&T.exit.id||'n/a'),esc((T.exit&&T.exit.label)||''))
     +kpi('Next review',esc(ymd(T.next_review)),'last '+esc(ymd(T.last_review)))
-    +'</div><p class="trk-note">Paper trades, not advice. Every rule on the bench records what following it would have returned on a <b>'+usd(c.usd||500)+'</b> position after a '+pc(c.fee_pct,1)+' fee allowance a side plus price impact, priced once a scan. A rule earns a live buy signal only on trades it made after joining the bench: at least '+int(c.min_trades)+' that have had time to close, averaging '+n1(c.min_edge)+' or better after costs with t ≥ '+c.z+', in '+c.promote_after+' weekly reviews in a row. Until then its matches show as “under test”.</p></div>';
+    +'</div><p class="trk-note">Paper trades, not advice. Every rule on the bench records what following it would have returned on a <b>'+usd(c.usd||500)+'</b> position after a '+pc(c.fee_pct,1)+' fee allowance a side plus price impact, priced at every scan and once a minute while a scan runs. A rule earns a live buy signal only on trades it made after joining the bench: at least '+int(c.min_trades)+' that have had time to close, averaging '+n1(c.min_edge)+' or better after costs with t ≥ '+c.z+', in '+c.promote_after+' weekly reviews in a row. Until then its matches show as “under test”.</p></div>';
 }
 function kpi(k,v,s){return '<div class="kpi"><div class="k">'+k+'</div><div class="v">'+v+'</div><div class="s">'+s+'</div></div>';}
 
 /* the testing rules with the best record so far: the forward record once it has 10 matured trades, else the backtest */
 function leaders(n){
   var score=function(r){var f=r.fwd_now||{},b=(r.last||{}).bt||{};return f.n>=10?f.mean:(b.n?b.mean:null);};
-  return (T.bench||[]).filter(function(r){return r.status==='testing'&&!r.model&&score(r)!=null;}).sort(function(a,b){return score(b)-score(a);}).slice(0,n);
+  return (T.bench||[]).filter(function(r){return r.status==='testing'&&!r.model&&!r.fast&&score(r)!=null;}).sort(function(a,b){return score(b)-score(a);}).slice(0,n);
 }
 function buySec(){
   var c=T.cfg||{},size=U.posSize()||500,e=(T.exit||{}).params||{};
@@ -109,7 +110,7 @@ function openSec(){
   else body=table(['Coin','<Sell signal','Since entry, after costs','Now','Entry','Bought','Peak'],op.map(function(x){
     return '<tr><td class="l">'+coinCell(x.mint,x.sym)+'<br><span class="nm">'+esc(clip((RU[x.rule]||{}).label||x.rule,60))+'</span></td><td class="l sellcell" data-tl="st:'+x.id+'"></td><td data-tl="pl:'+x.id+'">'+n1(x.now_net)+'</td>'
       +'<td data-tl="px:'+esc(x.mint)+'">'+price(x.last_price)+'</td><td>'+price(x.in_price)+'<br><span class="nm">'+usd(x.in_mc)+'</span></td><td>'+esc(ago(x.in_ts))+'</td><td>'+xm((x.peak||x.in_price)/x.in_price)+'</td></tr>';}),'cards');
-  body+='<p class="fine">Prices refresh every few seconds from the live feed; the sell signal applies the live exit policy to them. The ledger itself records the sale at the next scan’s price, which can be worse than the level: a stop only fills at the price the scan sees.</p>';
+  body+='<p class="fine">Prices refresh every few seconds from the live feed; the sell signal applies the live exit policy to them. The ledger itself records the sale at the first price it reads at or past the level, a minute later at most while a scan runs and at the next scan otherwise (about two minutes between scans), so a stop can fill worse than its level.</p>';
   return sec('Open paper trades and sell signals',body,'tr-open');
 }
 
@@ -125,19 +126,20 @@ function warnSec(){
   return sec('Sell-side warnings: a push that tends to cool off',body,'tr-warn');
 }
 
+function heldTxt(h){return h==null?'–':(h<1?Math.round(h*60)+' min':h.toFixed(1)+'h');}
 function recordSec(){
   var cl=T.closed||[],R=T.record||{},body='';
   if(!cl.length)body='<p class="empty">No live paper trade has closed yet.</p>';
   else body='<p class="trk-note">'+rec(R)+'. Median '+n1(R.med)+', best '+n1(R.best)+', worst '+n1(R.worst)+', average hold '+(R.hold_h!=null?R.hold_h.toFixed(1)+'h':'n/a')+'.</p>'
     +table(['Coin','<Rule','Bought','Sold','Held','After costs','<Why'],cl.slice(0,40).map(function(x){
-      return '<tr><td class="l">'+coinCell(x.mint,x.sym)+'</td><td class="l">'+esc((RU[x.rule]||{}).label||x.rule)+'</td><td>'+price(x.in_price)+'<br><span class="nm">'+esc(when(x.in_ts))+'</span></td><td>'+price(x.out_price)+'<br><span class="nm">'+esc(when(x.out_ts))+'</span></td><td>'+(x.h!=null?x.h.toFixed(1)+'h':'–')+'</td><td class="'+(x.ret>0?'tr-up':'tr-dn')+'">'+n1(x.ret)+'</td><td class="l">'+esc(x.why)+'</td></tr>';}),'cards');
+      return '<tr><td class="l">'+coinCell(x.mint,x.sym)+'</td><td class="l">'+esc((RU[x.rule]||{}).label||x.rule)+'</td><td>'+price(x.in_price)+'<br><span class="nm">'+esc(when(x.in_ts))+'</span></td><td>'+price(x.out_price)+'<br><span class="nm">'+esc(when(x.out_ts))+'</span></td><td>'+heldTxt(x.h)+'</td><td class="'+(x.ret>0?'tr-up':'tr-dn')+'">'+n1(x.ret)+'</td><td class="l">'+esc(x.why)+'</td></tr>';}),'cards');
   return sec('Record of the live rules',body,'tr-rec');
 }
 
 function benchSec(){
   var nm=(T.bench||[]).filter(function(r){return r.model&&r.status!=='retired';}).length;
-  var b=(T.bench||[]).filter(function(r){return r.status!=='retired'&&(!r.model||r.status==='live');}).sort(function(x,y){return (y.status==='live')-(x.status==='live')||(((y.fwd_now||{}).mean||((y.last||{}).bt||{}).mean||-99)-((x.fwd_now||{}).mean||((x.last||{}).bt||{}).mean||-99));});
-  var gone=(T.bench||[]).filter(function(r){return r.status==='retired'&&!r.model;}),c=T.cfg||{};
+  var b=(T.bench||[]).filter(function(r){return r.status!=='retired'&&((!r.model&&!r.fast)||r.status==='live');}).sort(function(x,y){return (y.status==='live')-(x.status==='live')||(((y.fwd_now||{}).mean||((y.last||{}).bt||{}).mean||-99)-((x.fwd_now||{}).mean||((x.last||{}).bt||{}).mean||-99));});
+  var gone=(T.bench||[]).filter(function(r){return r.status==='retired'&&!r.model&&!r.fast;}),c=T.cfg||{};
   var rows=b.map(function(r){var l=r.last||{},f=r.fwd_now||{},bt=l.bt||{},hv=l.bt_halves||[];
     return '<tr><td class="l"><span title="'+esc(conds(r))+'">'+esc(r.label)+'</span><br><span class="nm">'+conds(r)+'</span></td><td class="l">'+stChip(r.status)+'</td>'
       +'<td>'+int(f.n||0)+(r.open?' <span class="nm">+'+r.open+' open</span>':'')+'</td><td>'+(f.n?pc(f.win*100,0):'–')+'</td><td>'+(f.n?n1(f.mean)+tval(f.t):'–')+'</td>'
@@ -148,6 +150,30 @@ function benchSec(){
     +(nm?'<p class="fine">'+nm+' machine-learning models are on the same bench, judged on the same bar; their records are on the <button type="button" class="linkbtn" id="tr-models-go">Models tab</button>. A model that earns a live signal shows above with the rules.</p>':'');
   if(gone.length)body+='<details class="rv-gone"><summary>Retired rules ('+gone.length+')</summary><ul class="rv-log">'+gone.map(function(r){return '<li><b>'+esc(r.label)+'</b>: '+esc(r.reason||'')+'</li>';}).join('')+'</ul></details>';
   return sec('Rules under test',body,'tr-bench');
+}
+
+/* quick rules on the minute data (undertow/fast.py): their own bench, their trades, and the exits on quick entries */
+function quickSec(){
+  var Q=T.quick;if(!Q)return '';
+  var M=Q.minute||{},K=Q.ticks||{},F=Q.cfg||{},c=T.cfg||{},body='';
+  body+='<p class="trk-note">While each scan works out its gates (10 to 15 minutes), the scanner reads DEX Screener once a minute for every coin inside the screener, close to passing, recently passing or held in a paper trade: price, liquidity, 5-minute volume, 5-minute buys and sells, boosts, plus GeckoTerminal’s 5-minute trending list and DEX Screener’s new boosts and ads every 2 minutes. Every open paper trade, from every rule, is stepped on those minutes, so a stop or a target fills within a minute of being reached instead of at the next scan. The quick rules below look at every minute and may buy a coin that passed every gate at the previous scan; each is judged on its own exit (15 minutes to 2 hours), on the same bar as every rule: at least '+int(c.min_trades)+' trades that have had time to close, averaging '+n1(c.min_edge)+' or better after costs with t ≥ '+c.z+', in '+c.promote_after+' weekly reviews in a row. The random control buys a random 0.5% of minutes on the same coins: what a quick rule has to beat.</p>';
+  body+='<p class="fine">'+(K.rows?int(K.rows)+' minute readings of '+int(K.coins)+' coins kept (the last '+(F.keep_h||36)+' hours), the latest '+esc(ago(K.last)):'No minute readings yet')+'. '
+    +(M.rounds?'This scan: '+int(M.rounds)+' rounds between '+esc(when(M.from))+' and '+esc(when(M.to))+' on '+int(M.coins)+' coins'+(M.errors?' ('+int(M.errors)+' failed)':'')+'; GeckoTerminal’s 5-minute trending list read '+int(M.gt_ok)+' of '+int(M.gt_tries)+' times; '+int(M.closed)+' paper trades closed on the minute data and '+int(M.opened)+' quick trades opened. Quick rules could buy '+int(M.eligible)+' coins.':'')+'</p>';
+  var R=(Q.rules||[]).filter(function(r){return r.status!=='retired';}).sort(function(a,b){return (b.status==='live')-(a.status==='live')||(((b.fwd_now||{}).mean||-99)-((a.fwd_now||{}).mean||-99));});
+  body+=R.length?table(['Quick rule','<Exit','<Status','Forward trades','Made money','Average after costs','<Verdict','<Since'],R.map(function(r){var f=r.fwd_now||{},l=r.last||{};
+    return '<tr><td class="l qrule">'+esc(r.label)+(r.all&&r.all.length?'<br><span class="nm">'+conds(r)+'</span>':'')+'</td><td class="l"><span class="nm">'+esc((EX[r.exit]||{}).label||r.exit)+'</span></td><td class="l">'+stChip(r.status)+'</td>'
+      +'<td>'+int(f.n||0)+(r.open?' <span class="nm">+'+r.open+' open</span>':'')+'</td><td>'+(f.n?pc(f.win*100,0):'–')+'</td><td>'+(f.n?n1(f.mean)+tval(f.t):'–')+'</td><td class="l">'+vchip(l.verdict)+'</td><td class="l">'+esc(ymd(r.status==='live'?r.since:r.added))+'</td></tr>';}),'cards')
+    :'<p class="empty">The quick rules join the bench at the next scan.</p>';
+  var tr=(Q.trades||[]).slice(0,40);
+  if(tr.length)body+='<h3 class="sub-h">Quick trades: the latest '+tr.length+' of '+int(Q.n_trades)+'</h3>'+table(['Coin','<Rule','Bought','After costs','Held','<Why'],tr.map(function(x){var r=RU[x.rule]||{},done=x.ret!=null;
+    return '<tr><td class="l">'+coinCell(x.mint,x.sym)+(x.live?' <span class="pill in">Live</span>':'')+'</td><td class="l">'+esc(clip(r.label||x.rule,70))+'</td><td>'+price(x.in_price)+'<br><span class="nm">'+esc(when(x.in_ts))+'</span></td>'
+      +'<td class="'+((done?x.ret:x.now_net)>0?'tr-up':'tr-dn')+'">'+n1(done?x.ret:x.now_net)+(done?'':' <span class="nm">open</span>')+'</td><td>'+(done?heldTxt(x.h):esc(ago(x.in_ts).replace(' ago','')))+'</td><td class="l">'+esc(done?x.why:'–')+'</td></tr>';}),'cards');
+  else body+='<p class="empty">No quick trade yet.</p>';
+  var ex=(Q.exits||[]).filter(function(e){return (e.now||{}).n||e.quick;}).sort(function(a,b){return (b.base-a.base)||((((b.now||{}).mean)||-99)-(((a.now||{}).mean)||-99));});
+  body+='<h3 class="sub-h">Exit policies on the quick entries</h3><p class="trk-note">Every quick trade is priced under every quick exit and under the live exit too, so they can be compared on the same entries: here against “'+esc(((Q.exits||[]).filter(function(e){return e.base;})[0]||{}).label||Q.base)+'”. A trade counts once every trade opened at that time could have closed under both policies.</p>'
+    +table(['Exit policy','Trades','Made money','Average after costs','Against the baseline'],ex.map(function(e){var n=e.now||{};
+      return '<tr'+(e.base?' class="holdrow"':'')+'><td class="l">'+esc(e.label)+(e.base?' <span class="nm">baseline</span>':'')+'</td><td>'+(n.n?int(n.n):'–')+'</td><td>'+(n.n?pc(n.win*100,0):'–')+'</td><td>'+(n.n?n1(n.mean):'–')+'</td><td>'+(e.base||!n.n||n.gain==null?'–':n1(n.gain).replace('%',' pts')+tval(n.t))+'</td></tr>';}),'cards');
+  return sec('Quick trades on the minute data',body,'tr-quick');
 }
 
 function exitSec(){
@@ -191,7 +217,7 @@ function render(){
   var w=$('#tradewrap');if(!w)return;load();
   if(!T){w.innerHTML='<p class="empty">The buy and sell ledger starts with the next scan.</p>';return;}
   var y=window.scrollY;
-  w.innerHTML=head()+buySec()+openSec()+warnSec()+recordSec()+benchSec()+exitSec()+varSec()+studySec()+logSec();
+  w.innerHTML=head()+buySec()+openSec()+warnSec()+recordSec()+benchSec()+quickSec()+exitSec()+varSec()+studySec()+logSec();
   $$('[data-tk]',w).forEach(function(b){b.onclick=function(){U.open(b.dataset.tk);};});
   var mg=$('#tr-models-go',w);if(mg)mg.onclick=function(){U.setView('models');};
   /* card tables stack into labelled rows on a phone: each cell carries its column's name */

@@ -56,8 +56,10 @@ EXIT_SLACK = {
 
 # Polite client pacing (seconds between calls per host). GeckoTerminal's free tier returned 429
 # after about 15 calls in a few seconds, consistent with its published ~30 calls a minute.
-PACE = {"geckoterminal": 2.2, "dexscreener": 1.1, "rugcheck": 1.1, "telegram": 0.8, "jupiter": 2.1, "rpc": 0.6,
-        "goplus": 1.0, "fxtwitter": 1.0, "vxtwitter": 1.0, "rdap": 1.0}
+# DEX Screener allows 300 requests a minute on its pair and token endpoints and 60 on its boosts, orders and ads
+# endpoints, so the two are paced apart.
+PACE = {"geckoterminal": 2.2, "dexscreener": 1.1, "dexscreener_tokens": 0.3, "rugcheck": 1.1, "telegram": 0.8,
+        "jupiter": 2.1, "rpc": 0.6, "goplus": 1.0, "fxtwitter": 1.0, "vxtwitter": 1.0, "rdap": 1.0}
 # Solana's public RPC answers mint lookups (authorities, Token-2022 extensions) for free. Set SOLANA_RPC_URL to a
 # free Helius or other endpoint for higher limits.
 RPC_URL = "https://api.mainnet-beta.solana.com"
@@ -327,6 +329,10 @@ EXIT_POOL = [
     {"id": "trail25_arm20", "trail": 25, "arm": 20, "sl": 30, "max_h": 24},
     {"id": "cool20_d5_8h", "cool": 20, "cool_drop": 5, "sl": 25, "max_h": 8},
     {"id": "fade20", "fade": 20, "sl": 30, "max_h": 24},
+    # quick exits (added 21 Oct 2026), stepped every minute on the minute data between scans
+    {"id": "q15m", "max_h": 0.25}, {"id": "q5_30m", "tp": 5, "max_h": 0.5},
+    {"id": "q5_sl5_1h", "tp": 5, "sl": 5, "max_h": 1}, {"id": "q10_sl7_2h", "tp": 10, "sl": 7, "max_h": 2},
+    {"id": "qtrail7_arm5_2h", "trail": 7, "arm": 5, "sl": 7, "max_h": 2},
 ]
 DEFAULT_EXIT = "tp10_8h"
 # Sell-side warnings: states that were followed by falls. Each review re-measures them on coins passing every gate.
@@ -374,11 +380,11 @@ TRADE_STUDY = {
 # ---- Attention (added 21 Oct 2026; undertow/attention.py lists the sources and what each variable means) ---------
 # Visitor counts for a project's website, X account or DEX Screener page are not published anywhere, so attention is
 # read from what is public: paid DEX Screener boosts, ads, profiles and community takeovers; the trending ranks of
-# GeckoTerminal (ranked partly on visits to its own pages) and Jupiter; X followers through a free mirror; Telegram
-# members; and the age of the website's domain. Boosts and trending ranks come every scan for every candidate. The rest
-# are read for coins inside the screener or close to passing: DEX Screener orders every orders_ttl_h hours, X hourly
-# for coins inside (x_ttl_h for the others), a domain once (again after web_retry_days if the lookup failed), all
-# within per-run budgets so a scan stays inside free limits.
+# GeckoTerminal (ranked on user engagement on its own site as well as trading) and Jupiter; X followers through a
+# free mirror; Telegram members; and the age of the website's domain. Boosts and trending ranks come every scan for
+# every candidate. The rest are read for coins inside the screener or close to passing: DEX Screener orders every
+# orders_ttl_h hours, X hourly for coins inside (x_ttl_h for the others), a domain once (again after web_retry_days if
+# the lookup failed), all within per-run budgets so a scan stays inside free limits.
 ATTN = {"orders_ttl_h": 3, "orders_budget": 30, "x_ttl_h_in": 1, "x_ttl_h": 3, "x_budget": 40, "web_retry_days": 7,
         "web_budget": 15, "gt_pages_1h": 2, "gt_pages_5m": 1, "keep_days": 3}
 # Candidate gates on attention, tested from the scan the data starts (outside the weekly intake, so the record starts
@@ -425,7 +431,10 @@ ATTENTION_RULES = [
 # ---- Correlations (added 21 Oct 2026; undertow/corr.py) ---------------------------------------------------------
 # Worked out once an hour from the Buy & sell path (every scan's reading of every coin passing every gate), one
 # reading per coin per hour, so a coin's minute-by-minute readings do not count as independent evidence.
-CORR = {"every_min": 60, "horizons_h": (1, 4, 12), "min_n": 200, "min_coins": 20, "z": 2.0, "min_rho": 0.05}
+CORR = {"every_min": 60, "horizons_h": (1, 4, 12), "min_n": 200, "min_coins": 20, "z": 2.0, "min_rho": 0.05,
+        # the minute data (corr.analyse_fast): one reading per coin every fast_every_min minutes, against the next 5,
+        # 15 and 30 minutes, on coins that passed every gate at a scan no more than fast_stale_min minutes old
+        "fast_horizons_min": (5, 15, 30), "fast_every_min": 15, "fast_stale_min": 45}
 
 # ---- Models (added 21 Oct 2026; undertow/models.py says how they are trained and tested) ---------------------------
 # A separate job (.github/workflows/train.yml) retrains every model every_h hours from the Buy & sell path; the scan
@@ -436,7 +445,10 @@ CORR = {"every_min": 60, "horizons_h": (1, 4, 12), "min_n": 200, "min_coins": 20
 # trades are kept keep_trade_days (they far outnumber the rules'); the training history keep_days.
 MODELS = {"every_h": 6, "min_samples": 1200, "min_coins": 40, "fold_h": 8, "min_train": 400, "min_test": 100,
           "keep_days": 60, "top_share": 0.2, "luck_draws": 200, "exit_every": 2, "max_exit_rows": 60_000,
-          "seq_steps": 8, "max_age_h": 30, "exit_thr": 0.5, "keep_trade_days": 28}
+          "seq_steps": 8, "max_age_h": 30, "exit_thr": 0.5, "keep_trade_days": 28,
+          # the scan asks for a training run when GitHub has not run the schedule on time (scan.train_request): models
+          # older than every_h + 1 hours, a collecting summary older than retry_collecting_h, at most once per ask_every_h
+          "retry_collecting_h": 2, "ask_every_h": 1.5}
 # The variable sets every algorithm is trained on, so the page can show what each set adds.
 MODEL_SETS = {"all": "every variable", "no_attention": "every variable except attention",
               "attention_price": "attention and the price path only"}
@@ -512,3 +524,45 @@ ML_STUDY = {
          "trades": 5989, "net": -5.34, "base_net": -5.14, "gain": -0.2, "gain_t": -0.6},
     ],
 }
+
+# ---- Minute data and quick trades (added 21 Oct 2026; undertow/fast.py reads, undertow/minute.py works out) -------
+# A sampler reads DEX Screener every every_s seconds for up to max_coins coins (inside the screener, entering, passing
+# at some scan in the last watch_recent_h hours, or holding a paper trade) while each scan works out its gates, and
+# every slow_every rounds GeckoTerminal's 5-minute trending list and DEX Screener's boosts and ads feeds. Every open
+# paper trade is stepped on those minutes, and the quick rules below may buy coins that passed every gate at the
+# previous scan (whose gates were known by then), provided that scan is no more than stale_scan_min minutes old. A
+# quick rule buys a coin again only once its last trade on it has closed and reentry_min minutes have passed since it
+# bought. Quick exits are compared on quick trades against baseline_exit. Minute readings are kept keep_h hours, feed
+# entries feed_keep_days days.
+FAST = {"every_s": 60, "slow_every": 2, "max_coins": 240, "watch_recent_h": 2, "keep_h": 24, "feed_keep_days": 7,
+        "stale_scan_min": 45, "reentry_min": 30, "baseline_exit": "q5_sl5_1h"}
+
+
+def _quick(rid, label, exit_id, *conds, random=None):
+    r = {**_rule(rid, label, *conds), "fast": True, "exit": exit_id, "source": "quick rule, minute data"}
+    if random:
+        r["random"] = random
+    return r
+
+
+# Quick entry rules, checked every minute on coins that passed every gate at the previous scan. Each is judged on its
+# own exit (quick ones, 30 minutes to 2 hours), on trades it made after joining the bench, against the same bar as
+# every rule. fast_random buys a random 0.5% of coin-minutes (about 15 trades an hour): what any quick entry has to beat.
+FAST_RULES = [
+    _quick("fast_breakout", "Quick breakout: up 3%+ in 5 min on 2x the hour's volume pace, buyers ahead, under 25% off "
+           "its 30-min low", "q10_sl7_2h", ("m5", ">=", 3), ("v5x", ">=", 2), ("bs5", ">=", 1.2), ("up30", "<", 25)),
+    _quick("fast_trend_climb", "Climbing GeckoTerminal's 5-min trending list (5+ places in 15 min), not falling, under "
+           "20% off its 30-min low", "q5_sl5_1h", ("gtr5_d15", ">=", 5), ("m5", ">=", 0), ("up30", "<", 20)),
+    _quick("fast_boost_fresh", "Boosts bought in the last 15 min, under 15% off its 30-min low", "q5_30m",
+           ("bst_d15", ">=", 1), ("up30", "<", 15)),
+    _quick("fast_dip_buy", "Dip turning: 10%+ under its 30-min high, up since the last minute, buyers at least even",
+           "q5_sl5_1h", ("dn30", "<=", -10), ("m1", ">", 0), ("bs5", ">=", 1)),
+    _quick("fast_quiet_accum", "Quiet accumulation: flat over 15 min (within 2%), 5-min volume 1.5x the hour's pace, "
+           "1.5 buys per sell", "q10_sl7_2h", ("m15", ">=", -2), ("m15", "<=", 2), ("v5x", ">=", 1.5), ("bs5", ">=", 1.5)),
+    _quick("fast_momentum", "Momentum: up 5%+ in 15 min and still rising, volume 1.5x the hour's pace, under 30% off "
+           "its 30-min low", "qtrail7_arm5_2h", ("m15", ">=", 5), ("m5", ">=", 1), ("v5x", ">=", 1.5), ("up30", "<", 30)),
+    _quick("fast_ad_running", "A DEX Screener ad seen in the last day, under 15% off its 30-min low", "q5_sl5_1h",
+           ("ad_imp", ">=", 1), ("up30", "<", 15)),
+    _quick("fast_random", "Random control: a random 0.5% of minutes on coins passing every gate", "q5_sl5_1h",
+           random=0.005),
+]

@@ -12,15 +12,15 @@ The sample is the Buy & sell path: every scan's reading of every coin that passe
 per coin per hour so a coin's readings 15 minutes apart do not count as independent evidence. Variables worked out
 from the price itself (its recent changes, distance from highs and lows) move with the price by construction, so
 "together" is left blank for them."""
-import math
+import bisect, math
 from collections import defaultdict
-from . import trade as TRD, attention as ATT
+from . import trade as TRD, attention as ATT, minute as MIN
 
 H = 3600
 # variables derived from the price: their co-movement with it is arithmetic, not evidence. Liquidity counts too: half a
 # pool is the coin itself, so its dollar value moves with the price, and the ratios with market cap in them follow
 PRICE_DERIVED = {"r15", "r30", "r3h", "ru6", "dd6", "vola", "hi_h", "c5m", "c1h", "c6h", "c24h", "dd24s", "mc", "liq",
-                 "liq_pct", "lfdv", "turn", "exit"}
+                 "liq_pct", "lfdv", "turn", "exit", "m1", "m5", "m15", "m30", "up30", "dn30"}
 # positive quantities compare on a log scale over the hour; the rest as plain differences
 LOG_KEYS = {"mc", "liq", "v5m", "v1h", "v6h", "v24h", "hold", "xf", "tgm", "tr1h", "age", "web_age"}
 GROUPS = [
@@ -31,6 +31,7 @@ GROUPS = [
     ("Holders", ("hold", "hc1h", "hc24h", "org", "top10", "rf")),
     ("Attention", tuple(ATT.KEYS) + ("tgm", "tgr")),
     ("Market", ("mkt1h", "sol24")),
+    ("Minute data", tuple(MIN.KEYS)),
 ]
 
 
@@ -242,3 +243,71 @@ def _rnd(d):
     if not d:
         return d
     return {k: (round(v, 4) if isinstance(v, float) else v) for k, v in d.items()}
+
+
+# ---------------------------------------------------------------- minute horizons
+def _after(ts_list, rows, t, tol):
+    """The first minute price at or after t (within tol seconds) from one coin's readings."""
+    j = bisect.bisect_left(ts_list, t)
+    while j < len(rows) and rows[j]["ts"] <= t + tol:
+        if rows[j].get("price"):
+            return rows[j]["price"]
+        j += 1
+    return None
+
+
+def analyse_fast(coins, passing, feeds, now, cfg):
+    """Every minute variable (minute.py) against the price change over the next few minutes: the question quick rules
+    bet on. coins: (mint, its minute readings ascending) for each coin (store.ticks_by_coin); passing: [(scan time,
+    {mints passing every gate})] ascending (store.passing_sets); feeds: DEX Screener feed entries (for ad impressions).
+    A reading counts when its coin passed every gate at the scan before the one running at the time (the gates quick
+    rules could have known), one reading per coin every every_min minutes so a coin's minutes do not count as
+    independent evidence. Returns the same shape as analyse(), with horizons in minutes."""
+    hz = list(cfg["fast_horizons_min"])
+    every = cfg["fast_every_min"] * 60
+    ads = MIN.Ads(feeds)
+    scan_ts = [p[0] for p in passing]
+    rec = []
+    for m, rows in coins:
+        ts_list = [t["ts"] for t in rows]
+        coin, last = MIN.Coin(), -1e18
+        for t in rows:
+            coin.add(t)
+            if t["ts"] - last < every or not t.get("price"):
+                continue
+            j = bisect.bisect_right(scan_ts, t["ts"]) - 2         # the scan before the one running at this minute
+            if j < 0 or m not in passing[j][1] or t["ts"] - scan_ts[j] > cfg["fast_stale_min"] * 60:
+                continue
+            fwd = {}
+            for h in hz:
+                p2 = _after(ts_list, rows, t["ts"] + h * 60, max(120, h * 12))
+                fwd[h] = (p2 / t["price"] - 1) * 100 if p2 else None
+            if all(v is None for v in fwd.values()):
+                continue
+            rec.append((t["ts"], m, MIN.features(coin, t, ads.at(m, t["ts"])), fwd))
+            last = t["ts"]
+    rec.sort(key=lambda r: r[0])
+    mid = rec[len(rec) // 2][0] if rec else now
+    labels = {k: (l, u) for k, l, u in MIN.VARIABLES}
+    out = {"ts": now, "points": len(rec), "coins": len({r[1] for r in rec}), "since": rec[0][0] if rec else None,
+           "horizons_min": hz, "mid": mid, "every_min": cfg["fast_every_min"], "vars": []}
+    for k in MIN.KEYS:
+        row = {"key": k, "label": labels[k][0], "unit": labels[k][1], "group": "Minute data",
+               "price_derived": k in PRICE_DERIVED}
+        lv = [(r[0], r[1], r[2][k], r[3]) for r in rec if _num(r[2].get(k))]
+        row["n"] = len(lv)
+        row["predicts"] = {}
+        for h in hz:
+            sel = [(t, m, v, fw[h]) for t, m, v, fw in lv if fw[h] is not None]
+            if len(sel) < cfg["min_n"]:
+                continue
+            res = spearman_t([x[2] for x in sel], [x[3] for x in sel], [x[1] for x in sel]) or {}
+            a = [x for x in sel if x[0] < mid]
+            b = [x for x in sel if x[0] >= mid]
+            r1 = spearman_t([x[2] for x in a], [x[3] for x in a], [x[1] for x in a]) if len(a) >= 30 else None
+            r2 = spearman_t([x[2] for x in b], [x[3] for x in b], [x[1] for x in b]) if len(b) >= 30 else None
+            res["rho1"], res["rho2"] = (r1 or {}).get("rho"), (r2 or {}).get("rho")
+            res["verdict"] = verdict(res, cfg)
+            row["predicts"][str(h)] = _rnd(res)
+        out["vars"].append(row)
+    return out

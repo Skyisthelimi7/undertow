@@ -8,9 +8,10 @@ ATH with an hourly snapshot of every tracked token, a Lab that scores which vari
 and a waiting room for tokens that fall out. Every week it reviews its own gates against what happened next, drops
 the ones that make no difference, and tests new rules. Signed-in visitors can call rugs on a public scoreboard,
 vote and tag tokens; the crowd is shown beside the gates and never changes them. A Buy & sell tab paper-trades entry
-rules and exit policies that have to earn a live signal; a Correlations tab measures how every variable moves with
-the price; a Models tab trains machine-learning entry and exit models every 6 hours, tests them walk-forward and then
-paper-trades them forward. Everything runs on free data. The scanner needs Python 3.9+ and the standard library only;
+rules and exit policies that have to earn a live signal, including quick rules that buy and sell on one-minute
+readings taken while each scan runs; a Correlations tab measures how every variable moves with the price over the
+next minutes and hours; a Models tab trains machine-learning entry and exit models every 6 hours, tests them
+walk-forward and then paper-trades them forward. Everything runs on free data. The scanner needs Python 3.9+ and the standard library only;
 the Models tab needs the pinned libraries in `requirements-ml.txt` (the scan carries on without them).
 
 ## Run it
@@ -24,8 +25,9 @@ the Models tab needs the pinned libraries in `requirements-ml.txt` (the scan car
     python3 -m unittest discover -s tests
 
 A token needs `ENTER_SCANS` (2) clean scans in a row to enter, so the map is empty until the second run. A run
-takes 7 to 10 minutes on free rate limits, most of it waiting on GeckoTerminal; the first run of each hour also
-walks GeckoTerminal's per-DEX pool lists, which adds about 5 minutes. Run it every 20 minutes to an hour (below).
+takes 12 to 20 minutes on free rate limits, most of it waiting on GeckoTerminal and RugCheck, with the minute sampler
+running throughout; the first run of each hour also walks GeckoTerminal's per-DEX pool lists, which adds about 5
+minutes. Run it every 20 minutes to an hour (below).
 Open `docs/index.html` from any web host: it loads `data.json` from its own folder, re-reads it every 5 minutes, and
 shows when the last scan ran and whether the next one is overdue. A copy built with `--embed` also opens from disk.
 
@@ -213,9 +215,13 @@ rarely block a coin on their own.
 
 The Buy & sell tab is a paper ledger, not advice. Every scan, each coin that passes every gate is checked against a
 bench of entry rules (`ENTRY_POOL` in the config, `undertow/trade.py`). A rule that fires opens a paper trade at that
-scan's price; every later scan steps the trade through every exit policy on the bench (`EXIT_POOL`), so one entry has
-a result under each way of selling it. Results are after a 1% fee allowance a side plus price impact on a $500
-position (`TRADE` in the config), priced once a scan, so a stop fills at the next scan's price rather than at its level.
+scan's price; every later price reading steps the trade through every exit policy on the bench (`EXIT_POOL`), so one
+entry has a result under each way of selling it. Results are after a 1% fee allowance a side plus price impact on a
+$500 position (`TRADE` in the config). Each scan reads prices three ways, in time order: its own reading of every
+price, which steps every open trade at once; one reading a minute while it works out the gates (next section), which
+steps them again; and, once the gates are known, the scan's decisions (a structure gate failed, an exit model says
+sell), carried out at each trade's latest price. A stop fills at the first price read at or past its level, within a
+minute while a scan runs.
 
 * **Live buy signals.** A rule goes live only on its forward record: trades opened after it joined the bench, which it
   was never fitted to. It needs at least 30 matured trades averaging +1% or better after costs with t ≥ 2 (errors
@@ -248,6 +254,36 @@ To use it: open **Buy & sell**. With no live rule, it shows what the leading rul
 warning state, and every rule's record. Telegram alerts (when set up) post live buy and sell signals and review
 changes; rules under test never alert.
 
+## Minute data and quick trades
+
+A scan spends 10 to 15 minutes working out its gates. Meanwhile a sampler (`undertow/fast.py`, `FAST` in the config)
+reads DEX Screener once a minute for up to 240 coins: inside the screener, entering, passing at a scan in the last two
+hours, or held in a paper trade. Each reading has the price, liquidity, market cap, 5-minute and 1-hour volume,
+5-minute buys and sells, the 5-minute and 1-hour price change and the boosts running; every other minute it also reads
+GeckoTerminal's 5-minute trending list and DEX Screener's feeds of the latest boosts and ads. Scans run back to back,
+so the minutes are nearly continuous: the gap is about two minutes a scan, a run's start-up and its own price reading.
+
+* **Short-window variables** (`undertow/minute.py`): the price change over 1, 5, 15 and 30 minutes, the rise from the
+  30-minute low and the distance from the 30-minute high, the 5-minute volume against the hour's pace, buys per sell
+  over 5 minutes, the change in the 5-minute trending score over 15 minutes, boosts bought in the last 15 minutes, and
+  the impressions DEX Screener's ads feed lists for the coin's ads in the last day. They are also worked out at every
+  scan for coins passing every gate, so the weekly review, the correlations and the models read them too.
+* **Every paper trade, every minute.** All open trades, from every rule and model, are stepped on the minutes, so
+  targets, stops and time limits act within a minute. "Cooling off" compares one scan's price with the last, so it is
+  still judged at scans only.
+* **Quick rules** (`FAST_RULES`): a breakout on volume, a climb up the 5-minute trending list, fresh boosts, a dip
+  turning, quiet accumulation, momentum and a running ad, each with its own quick exit (15 minutes to 2 hours: targets
+  of 5 or 10%, stops of 5 to 7%, a trailing stop), and a random control that buys a random 0.5% of minutes. They may buy
+  a coin only if it passed every gate at the previous scan, since the running scan's gates are not known yet; a rule
+  buys a coin again only once its last trade there has closed and 30 minutes have passed. Each is judged on its own
+  exit against the same bar as every rule, and promoted or retired at the same weekly review. Every quick trade is
+  priced under every quick exit and the live exit too, and the tab compares them on the quick entries; quick trades
+  are kept out of the comparison that picks the live exit for the scan's rules.
+* **Alerts as they happen.** A live quick rule's buy, and any live trade's sale on the minute data, go to Telegram
+  from the sampler that minute, not at the end of the scan.
+
+The minute readings are kept 24 hours (about 30 MB of the database for 130 coins watched), the feeds a week.
+
 ## Attention: the public stand-ins for visitor counts
 
 Visitor numbers for a project's website, its X account or its DEX Screener page are not published anywhere: only
@@ -257,8 +293,10 @@ their owners see them. The scanner records what is public instead (`undertow/att
   the last hour; from its orders endpoint, paid ads (and one in the last 3 hours), a paid profile and community
   takeovers, every 3 hours; and how many links the coin's profile lists.
 * **Trending ranks, every scan**: GeckoTerminal's trending pools over 1 hour and 5 minutes (GeckoTerminal ranks them
-  partly on visits to its own pages, the nearest free stand-in for page views), whether a coin joined the 1-hour list
-  in the last hour, and Jupiter's trending lists over 1 and 6 hours.
+  on user engagement on its own site as well as trading, the nearest free stand-in for page views), whether a coin
+  joined the 1-hour list in the last hour, and Jupiter's trending lists over 1 and 6 hours. The 5-minute list is read
+  every other minute as well (minute data). DEX Screener's own trending score counts visits to its pages, but its API
+  publishes neither the score nor the visits; its ads feed's impression counts are the closest it comes.
 * **X followers** through fxtwitter's free public mirror (X's own API is paid): hourly for coins inside the screener,
   every 3 hours for coins close to passing. Growth over 6 hours, and a spike measure: the last hour's growth minus the
   day's average.
@@ -283,13 +321,16 @@ price change over the next 1, 4 and 12 hours, with the earlier and later half of
 cap is price times a fixed supply, so the same figures hold for it. The sample is the Buy & sell path (every coin
 passing every gate), one reading per coin per hour. "Holds" needs |rho| of at least 0.05, t of at least 2 and the same
 sign in both halves; variables worked out from the price itself (liquidity included, since half a pool is the coin)
-are not scored on moving with it.
+are not scored on moving with it. A second table asks the quick rules' question of the minute data: each short-window
+variable against the price change over the next 5, 15 and 30 minutes, one reading per coin every 15 minutes, on coins
+that passed every gate at the scan before.
 
 ## Models: machine learning, tested twice
 
 `undertow/models.py` trains every algorithm in `undertow/zoo.py` plus an LSTM (`undertow/lstm.py`) on three variable
 sets (every variable; every variable except attention; attention and the price path only), so the gap between the
-first two shows what attention adds. The algorithms: logistic regression, random forest, extra trees, gradient
+first two shows what attention adds. The minute data's short-window variables, worked out at every scan from
+21 October 2026, are among "every variable"; a variable with no readings in a training window is left out of it. The algorithms: logistic regression, random forest, extra trees, gradient
 boosting, XGBoost, LightGBM, k nearest neighbours, naive Bayes, a small neural network, the LSTM over each coin's last 8
 scans, and five models of the trade's return (ridge, random forest, gradient boosting, XGBoost, LightGBM), with a
 random-score control. Exit models (logistic regression, random forest, gradient boosting, LightGBM, neural network)
@@ -395,7 +436,9 @@ the page shows when the last scan ran and warns when one is overdue.
     undertow/review.py     the weekly gate review: verdicts, drops, promotions, the testing bench (pure)
     undertow/trade.py      buy and sell signals: entry rules, exit policies, paper trades, the weekly trade review (pure)
     undertow/attention.py  attention variables: boosts, ads, trending ranks, X followers, Telegram, domain age (pure)
-    undertow/corr.py       the Correlations tab: every variable against the price (pure)
+    undertow/corr.py       the Correlations tab: every variable against the price, hours and minutes ahead (pure)
+    undertow/minute.py     the minute data's short-window variables (pure)
+    undertow/fast.py       the minute sampler and the minute ledger: trades stepped and quick rules checked every minute
     undertow/models.py     the Models tab: datasets, walk-forward tests, training, loading and scoring
     undertow/zoo.py        the algorithms, small and regularised; lstm.py, the LSTM in numpy
     undertow/train.py      the training job: copies the path into its history, trains, saves the models
@@ -440,10 +483,18 @@ the page shows when the last scan ran and warns when one is overdue.
   alarms, they do not remove them, and four weeks of one market regime is still one regime.
 * **The crowd can be gamed** (sock-puppet accounts, coordinated tags). That is why it never gates, and why calls are
   scored against the base rate rather than counted.
-* **Paper trades are not fills.** The ledger prices a trade once a scan at DEX Screener's price, with a fee allowance
-  and a pool-model price impact. Real fills add slippage on fast moves, priority fees and failed transactions, and a
+* **Paper trades are not fills.** The ledger prices a trade at DEX Screener's price, once a minute while a scan runs
+  and at every scan, with a fee allowance and a pool-model price impact. Between scans there is a gap of about two
+  minutes with no reading, and coins outside the watch list (240 at most) are priced at scans only. Real fills add slippage on fast moves, priority fees and failed transactions, and a
   public signal can move a thin pool before you act on it. A live rule's record is evidence about the past, not a
   promise about its next trade.
+* **A scan rule's entry price comes first.** A rule that fires at a scan buys at that scan's price reading, a few
+  minutes before the gates it relied on were finished (they read data from the whole run). That keeps the forward
+  record comparable with the backtests and the models, which enter the same way; quick rules avoid it by reading only
+  the previous scan's gates.
+* **Minute data is short.** The minute readings start on 21 October 2026 and are kept 24 hours; quick rules need weeks
+  of forward trades before any can go live, and over minutes the round-trip cost (a median 2.2% a side at $500 in the
+  study) is large against typical moves.
 * **Many rules, few weeks.** With 24 rules under test, one will clear the bar by luck now and then. Requiring a
   forward record, two reviews in a row and a backtest that agrees cuts that down; it does not remove it.
 

@@ -62,11 +62,12 @@ def gt_info(mint):
 
 
 # ---- DEX Screener: batch price/volume/liquidity/socials (30 tokens per call) -----------------
-def ds_tokens(mints):
+def ds_tokens(mints, quiet=False, tries=3, timeout=25):
     out = {}
     for i in range(0, len(mints), 30):
         chunk = mints[i:i + 30]
-        d = fetch("dexscreener", f"{DS}/tokens/v1/solana/{','.join(chunk)}")
+        d = fetch("dexscreener_tokens", f"{DS}/tokens/v1/solana/{','.join(chunk)}", quiet=quiet, tries=tries,
+                  timeout=timeout)
         for p in d or []:
             m = p["baseToken"]["address"]
             liq = ((p.get("liquidity") or {}).get("usd")) or 0
@@ -84,6 +85,7 @@ def ds_tokens(mints):
                 "vol": p.get("volume") or {}, "chg": p.get("priceChange") or {},
                 "buys24": (tx.get("h24") or {}).get("buys"), "sells24": (tx.get("h24") or {}).get("sells"),
                 "buys1": (tx.get("h1") or {}).get("buys"), "sells1": (tx.get("h1") or {}).get("sells"),
+                "buys5": (tx.get("m5") or {}).get("buys"), "sells5": (tx.get("m5") or {}).get("sells"),
                 "created": p.get("pairCreatedAt"), "twitter_url": soc.get("twitter"), "telegram_url": soc.get("telegram"),
                 # paid DEX Screener boosts running now (absent means none), the project's website, and how many links
                 # its DEX Screener profile lists
@@ -108,14 +110,39 @@ def ds_orders(mint):
             "cto": int(any(o.get("type") == "communityTakeover" for o in ok))}
 
 
+def ds_feed(kind, quiet=False):
+    """DEX Screener's live feeds of the latest paid boosts ("boosts") and ads ("ads"), Solana only:
+    [{"mint", "amount", "total", "impressions", "at" (unix s)}]. None on failure."""
+    import calendar
+    path = {"boosts": "token-boosts/latest/v1", "ads": "ads/latest/v1"}[kind]
+    d = fetch("dexscreener", f"{DS}/{path}", tries=1 if quiet else 2, quiet=quiet)
+    if d is None:
+        return None
+    out = []
+    for e in d if isinstance(d, list) else []:
+        if e.get("chainId") != "solana" or not e.get("tokenAddress"):
+            continue
+        at = None
+        if e.get("date"):
+            try:
+                at = calendar.timegm(time.strptime(e["date"][:19], "%Y-%m-%dT%H:%M:%S"))
+            except ValueError:
+                at = None
+        out.append({"mint": e["tokenAddress"], "amount": e.get("amount"), "total": e.get("totalAmount"),
+                    "impressions": e.get("impressions"), "at": at})
+    return out
+
+
 # ---- Attention: trending lists, X followers, website domain age ------------------------------
-def gt_trending(duration="1h", pages=2):
+def gt_trending(duration="1h", pages=2, quiet=False):
     """GeckoTerminal's trending pools for Solana, in rank order, as base-token mints. GeckoTerminal ranks them on user
     engagement on its site, market activity and pool security, so a rank is the nearest free stand-in for visits.
-    duration: 5m, 1h, 6h or 24h. Returns None when the first page fails."""
+    duration: 5m, 1h, 6h or 24h. Returns None when the first page fails. quiet: one try, and a failure does not count
+    towards GeckoTerminal being down (the minute sampler's reads)."""
     out = []
     for pg in range(1, pages + 1):
-        d = fetch("geckoterminal", f"{GT}/trending_pools?duration={duration}&page={pg}")
+        d = fetch("geckoterminal", f"{GT}/trending_pools?duration={duration}&page={pg}", tries=1 if quiet else 3,
+                  quiet=quiet)
         if d is None:
             return out or None
         for p in d.get("data") or []:

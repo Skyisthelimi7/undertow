@@ -306,9 +306,11 @@ class Ledger(unittest.TestCase):
         self.st.close()
 
     def scan(self, now, prices, hard=()):
+        """One scan as run() does it: the scan's price reading steps every open trade, then the ledger at decision time."""
         rows = [fake_row(m, p, hard=m in hard) for m, p in prices.items()]
         ds = {m: {"price": p, "liq": 200_000, "chg": {"h1": 0.0}} for m, p in prices.items()}
-        pol, feats, ch, _picks, _sells = SC.trade_step(self.st, rows, ds, now, {})
+        SC.scan_step(self.st, ds, now, {e["id"]: e for e in SC.exit_pool_of(None)}, C.TRADE)
+        pol, feats, ch, _picks, _sells, _minute, _closed = SC.trade_step(self.st, rows, ds, now, {})
         return pol, feats, ch, rows
 
     def test_rules_open_trades_that_every_exit_follows(self):
@@ -346,9 +348,17 @@ class Ledger(unittest.TestCase):
         self.assertTrue(self.st.open_sigs())
         self.scan(t0 + 1800, {"A": 0.9}, hard={"A"})
         self.assertFalse(self.st.open_sigs())
-        self.assertTrue(all(o[2] == "structure gate failed" for s in self.st.sigs() for o in s["out"].values()))
+        # every policy still open when the gate failed sold on it; the quick exits had already sold at the scan's price
+        # reading, which comes first (their time limits and tight stops)
+        for s in self.st.sigs():
+            self.assertEqual(s["out"]["tp10_8h"][2], "structure gate failed")
+            self.assertLessEqual({o[2] for o in s["out"].values()}, {"structure gate failed", "time", "stop"})
+            self.assertEqual({pid for pid, o in s["out"].items() if o[2] != "structure gate failed"},
+                             {e["id"] for e in C.EXIT_POOL if e.get("max_h", 24) <= 2})
         # A is no longer a candidate: still followed on price for follow_h
-        SC.trade_step(self.st, [], {"A": {"price": 0.8, "liq": 1000, "chg": {"h1": -5}}}, t0 + 2700, {})
+        ds = {"A": {"price": 0.8, "liq": 1000, "chg": {"h1": -5}}}
+        SC.scan_step(self.st, ds, t0 + 2700, {e["id"]: e for e in C.EXIT_POOL}, C.TRADE)
+        SC.trade_step(self.st, [], ds, t0 + 2700, {})
         path = self.st.tpath(0)["A"]
         self.assertEqual(path[-1][1], "G")
         self.assertEqual([r[1] for r in path[:3]], ["I", "I", "X"])

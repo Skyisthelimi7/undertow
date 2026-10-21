@@ -89,6 +89,14 @@ jobs:
       - if: steps.prep.outputs.go == 'true'
         id: deploy
         uses: actions/deploy-pages@v4
+      # GitHub often runs the 6-hourly training hours late; the scan leaves a note when the models are overdue
+      # (scan.train_request), at most once every hour and a half
+      - name: Start a training run when the models are overdue
+        if: ${{ !cancelled() && steps.prep.outputs.go == 'true' && hashFiles('state/train_due') != '' }}
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run train.yml --ref main --repo "$GITHUB_REPOSITORY"
       # Each run starts the next, so the page does not depend on GitHub's scheduler. A run that failed waits 10
       # minutes first, so a broken data source cannot spin the loop. The concurrency group keeps at most one run
       # waiting, so a chained run and a scheduled one merge instead of multiplying. To stop scanning, disable the
