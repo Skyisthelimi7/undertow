@@ -263,8 +263,9 @@ their owners see them. The scanner records what is public instead (`undertow/att
   every 3 hours for coins close to passing. Growth over 6 hours, and a spike measure: the last hour's growth minus the
   day's average.
 * **Telegram**: member growth over 6 hours and the share online, from the public counts the bot-risk check reads.
-* **Website**: the age of its domain from public RDAP registration records, or a flag when it sits on a free host or
-  link page (vercel.app, linktr.ee and the like), whose age says nothing.
+* **Website**: the age of its domain from public RDAP registration records, whether the domain was bought for the
+  launch (registered no more than 30 days before the coin's pool) or predates the coin (borrowed or recycled), or a flag
+  when it sits on a free host or link page (vercel.app, linktr.ee, github.com and the like), whose age says nothing.
 
 Each source runs within a per-run budget, coins inside the screener first, and the three slow ones (orders, X, RDAP) in
 parallel threads. The variables go everywhere the others go: the Lab and the gate review test them as candidate
@@ -281,7 +282,8 @@ with the price over the same hour; does its change lead the price over the next 
 price change over the next 1, 4 and 12 hours, with the earlier and later half of the window shown separately. Market
 cap is price times a fixed supply, so the same figures hold for it. The sample is the Buy & sell path (every coin
 passing every gate), one reading per coin per hour. "Holds" needs |rho| of at least 0.05, t of at least 2 and the same
-sign in both halves; variables worked out from the price itself are not scored on moving with it.
+sign in both halves; variables worked out from the price itself (liquidity included, since half a pool is the coin)
+are not scored on moving with it.
 
 ## Models: machine learning, tested twice
 
