@@ -282,7 +282,7 @@ so the minutes are nearly continuous: the gap is about two minutes a scan, a run
 * **Alerts as they happen.** A live quick rule's buy, and any live trade's sale on the minute data, go to Telegram
   from the sampler that minute, not at the end of the scan.
 
-The minute readings are kept 24 hours (about 30 MB of the database for 130 coins watched), the feeds a week.
+The minute readings are kept 24 hours (about 25 MB of the database for 130 coins watched), the feeds a week.
 
 ## Attention: the public stand-ins for visitor counts
 
