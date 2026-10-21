@@ -450,8 +450,9 @@ function attnSec(k){
     +'<dt>Links on its profile</dt><dd>'+(a.nlinks!=null?int(a.nlinks):'n/a')+'</dd>'
     +'<dt>Website</dt><dd>'+(a.domain?esc(a.domain)+(a.web_free?' · free host or link page':(a.web_age!=null?' · registered '+int(a.web_age)+' days ago'+(a.web_new===1?', bought for the launch':(a.web_new===0?', older than the coin':'')):' · registration date not public')):'none listed')+'</dd>'
     +'<dt>Telegram growth</dt><dd>'+(a.tgg!=null?spct(a.tgg)+' an hour over 6h':'n/a')+(a.tgo!=null?' · '+pc(a.tgo*100,1)+' online':'')+'</dd></dl>';
+  var big=a.xf!=null&&a.xf>=1e6?'<p class="fine">Over a million followers: probably a famous account the coin points to, not its own. Treat its growth as noise.</p>':'';
   var spark=a.x_hist&&a.x_hist.length>=3?'<p class="fine" style="display:flex;align-items:center;gap:8px">'+followerLine(a.x_hist)+' X followers at each reading</p>':'';
-  return '<section class="xr-sec"><h3>Attention</h3>'+figs+dl+spark
+  return '<section class="xr-sec"><h3>Attention</h3>'+figs+dl+big+spark
     +'<p class="fine">Visitor numbers for a project’s website, its X account or its DEX Screener page are not published anywhere; only their owners see them. These are the public stand-ins: paid boosts, ads and profiles on DEX Screener, GeckoTerminal’s trending list (ranked partly on visits to its pages), Jupiter’s trending list, X followers through a free mirror, Telegram members and the age of the website’s domain. Spikes are measured against the coin’s own readings. The Lab, the gate review, Buy &amp; sell and the Models tab test whether any of them predicts anything.</p></section>';
 }
 function renderXray(k){
