@@ -1,10 +1,11 @@
 """Train the Models tab's models (models.py says how they are tested).
 
-    python3 -m undertow.train --db state/undertow.db --dir state/models
+    python3 -m undertow.train --db state/undertow.db --dir state/models --history state/history/history.db
 
-Copies the scanner's Buy & sell path into --dir/history.db first, so the training history can outgrow the
+Copies the scanner's Buy & sell path into the --history database first, so the training history can outgrow the
 TRADE["path_days"] days the scanner itself keeps (up to MODELS["keep_days"]), then trains and tests every model on it
-under the live exit and writes each model and summary.json to --dir. The scan picks them up on its next run."""
+under the live exit and writes each model and summary.json to --dir. The scan picks them up on its next run. The
+history lives apart from the models so the scan, which restores the models every run, never downloads it."""
 import argparse, json, os, sqlite3, sys, time
 from . import config as C, models as MOD
 
@@ -42,10 +43,17 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--db", default="state/undertow.db")
     ap.add_argument("--dir", default="state/models")
+    ap.add_argument("--history", default="state/history/history.db")
     a = ap.parse_args()
     now = time.time()
     os.makedirs(a.dir, exist_ok=True)
-    path, policy = sync_history(a.db, os.path.join(a.dir, "history.db"), now, C.MODELS["keep_days"])
+    os.makedirs(os.path.dirname(os.path.abspath(a.history)), exist_ok=True)
+    old = os.path.join(a.dir, "history.db")            # where the first runs kept it
+    if not os.path.exists(a.history) and os.path.exists(old):
+        os.replace(old, a.history)
+    elif os.path.exists(old):
+        os.remove(old)
+    path, policy = sync_history(a.db, a.history, now, C.MODELS["keep_days"])
     exits = {e["id"]: e for e in C.EXIT_POOL}
     pol = exits.get((policy or {}).get("exit")) or exits[C.DEFAULT_EXIT]
     log(f"label: {pol['id']} ({MOD.TRD.exit_label(pol)})")

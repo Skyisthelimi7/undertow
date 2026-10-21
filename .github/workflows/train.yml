@@ -29,7 +29,13 @@ jobs:
           path: state/undertow.db
           key: undertow-db-never-matches
           restore-keys: undertow-db-
-      - name: Restore the models and the training history kept between runs
+      - name: Restore the training history kept between runs (up to 60 days of the path)
+        uses: actions/cache/restore@v4
+        with:
+          path: state/history
+          key: undertow-hist-never-matches
+          restore-keys: undertow-hist-
+      - name: Restore the previous models (the first runs kept the history with them)
         uses: actions/cache/restore@v4
         with:
           path: state/models
@@ -38,8 +44,13 @@ jobs:
       - name: Train and test every model
         run: |
           test -s state/undertow.db || { echo "::error::no saved history in the cache"; exit 1; }
-          python3 -m undertow.train --db state/undertow.db --dir state/models
-          ls -la state/models
+          python3 -m undertow.train --db state/undertow.db --dir state/models --history state/history/history.db
+          ls -la state/models state/history
+      - uses: actions/cache/save@v4
+        with:
+          path: state/history
+          key: undertow-hist-${{ github.run_id }}-${{ github.run_attempt }}
+      # the scan restores this one every run, so it holds only the models and their summary
       - uses: actions/cache/save@v4
         with:
           path: state/models

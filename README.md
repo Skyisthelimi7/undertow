@@ -20,7 +20,7 @@ the Models tab needs the pinned libraries in `requirements-ml.txt` (the scan car
     python3 build_page.py docs/index.html --embed docs/data.json          # ... or one file that also opens offline
     python3 -m undertow.scan inspect <MINT>                               # gate report for one token
     pip install -r requirements-ml.txt                                    # only for the Models tab
-    python3 -m undertow.train --db undertow.db --dir state/models         # train and test the models (scan reads --models)
+    python3 -m undertow.train --db undertow.db --dir state/models         # train and test the models (the scan's --models)
     python3 -m unittest discover -s tests
 
 A token needs `ENTER_SCANS` (2) clean scans in a row to enter, so the map is empty until the second run. A run
@@ -296,7 +296,7 @@ learn whether selling an open trade now beats holding on to the live exit.
 * **Training.** `.github/workflows/train.yml` runs `undertow/train.py` every 6 hours. It copies the Buy & sell path into
   its own history (kept up to 60 days, beyond the 14 the scanner keeps), labels one sample per coin per hour with the
   paper trade opened there under the live exit, after costs, and trains once there are 1,200 samples on 40 coins. The
-  models go to their own Actions cache; each scan restores the latest.
+  models go to their own Actions cache, which each scan restores; the training history has a cache of its own.
 * **Walk-forward test.** Folds split by time; each trains only on samples whose trades had closed before its test
   window opened (purging), so no training label reaches into a test window. Every figure on the tab is out
   of sample: AUC, accuracy, balanced accuracy, Brier score, the average after costs of the trades in the top fifth of
