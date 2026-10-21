@@ -37,8 +37,9 @@ function head(){
   var best=real[0],beat=real.filter(function(m){return m.beats_luck;}).length,profit=real.filter(function(m){return m.pick_net>0;}).length;
   var live=E.filter(function(m){return m.status==='live';}).length,trades=M.trades_total||0,c=M.cfg||{};
   return '<div class="trk-head"><div class="kpis">'
-    +kpi('Last trained',M.trained_at?esc(ago(M.trained_at,D.generated_at)):'Not yet',M.trained_at?esc(utc(M.trained_at))+' · every '+(c.every_h||6)+'h':'the training job runs every '+(c.every_h||6)+' hours')
-    +kpi('Training data',M.samples?int(M.samples)+' samples':'–',M.samples?int(M.coins)+' coins'+(M.period?', '+esc(utc(M.period[0]).slice(0,10))+' to '+esc(utc(M.period[1]).slice(0,10)):''):'')
+    +(M.status==='ok'?kpi('Last trained',esc(ago(M.trained_at,D.generated_at)),esc(utc(M.trained_at))+' · every '+(c.every_h||6)+'h')
+      :kpi('Last trained','Not yet',M.trained_at?'checked '+esc(ago(M.trained_at,D.generated_at))+' · again every '+(c.every_h||6)+'h':'the training job runs every '+(c.every_h||6)+' hours'))
+    +kpi('Training data',M.samples?int(M.samples)+' samples':'–',M.samples?int(M.coins)+' coins'+(M.period?', '+esc(utc(M.period[0]).slice(0,10))+' to '+esc(utc(M.period[1]).slice(0,10)):(M.status==='ok'?'':' · training starts at '+int(c.min_samples||1200)+' on '+int(c.min_coins||40))):'')
     +kpi('Best out of sample',best?n1(best.pick_net):'–',best?esc(best.algo)+', '+esc(setLabel(best.set))+' · all samples '+n1(best.base_net):'top fifth of each model’s scores, after costs')
     +kpi('Beat the luck line',real.length?int(beat)+' of '+int(real.length):'–',real.length?int(profit)+' made money after costs out of sample':'')
     +kpi('Forward paper trades',int(trades),'since each model was trained · '+int(live)+' live')
@@ -48,7 +49,10 @@ function head(){
 
 function entrySec(){
   var E=(M.entry||[]).slice(),c=M.cfg||{};
-  if(!E.length)return sec('Entry models','<p class="empty">'+esc(M.status||'Waiting for the first training run')+'.</p>','md-entry');
+  if(!E.length){var c2=M.cfg||{},msg=/^collecting/.test(M.status||'')&&M.samples!=null
+      ?'Training starts once the Buy &amp; sell path holds '+int(c2.min_samples||1200)+' labelled samples on '+int(c2.min_coins||40)+' coins (one per coin per hour, each a paper trade that has had time to close) and enough history for a walk-forward test. So far: '+int(M.samples)+' samples on '+int(M.coins)+' coins'+(M.trained_at?', checked '+esc(ago(M.trained_at,D.generated_at)):'')+'. Every algorithm’s result in the candle study is below in the meantime.'
+      :esc(M.status||'Waiting for the first training run')+'.';
+    return sec('Entry models','<p class="empty">'+msg+'</p>','md-entry');}
   var sets=[];E.forEach(function(m){if(m.set&&m.set!=='none'&&sets.indexOf(m.set)<0)sets.push(m.set);});
   E=E.filter(function(m){return (st.set==='*'||m.set===st.set||m.id==='random')&&(st.kind==='all'||m.kind===st.kind||m.id==='random');});
   var sk=function(m){var v=st.sort==='fwd'?((m.fwd||{}).n?(m.fwd||{}).mean:null):m[st.sort];return v==null?-1e9:v;};
@@ -130,8 +134,19 @@ function howSec(){
   var how='<div class="tr-study"><p><b>Algorithms.</b> Logistic regression; random forest and extra trees (bagged trees); gradient boosting, XGBoost and LightGBM (boosted trees); k nearest neighbours; naive Bayes; a small neural network; an LSTM, a recurrent neural network that reads each coin’s last 8 scans in order; and five models of the trade’s return rather than whether it wins (ridge, random forest, gradient boosting, XGBoost, LightGBM). Each is trained on three variable sets: every variable, every variable except attention, and attention with the price path only, so the gap between the first two shows what attention adds. A random-score model is trained and traded the same way as the control.</p>'
     +'<p><b>Overfitting.</b> Every model is small and regularised (shallow trees with large leaves, early stopping, weight decay), because a few days of a few hundred coins cannot support more. Folds split by time, never at random, and train only on trades that had closed before the test window opened; thresholds come from training scores only; the luck line allows for testing many models at once. Retrained every '+(c.every_h||6)+' hours on everything since the ledger started (up to 60 days); a model older than '+(c.max_age_h||30)+' hours stops opening trades.</p>'
     +'<p><b>Limits.</b> Readings come once a scan, about every 15 minutes, so a model sees what the scan saw and its trades fill at the next scan’s price. The history is short and one market regime; a model that cleared every test here could still fail when the market turns, which is why only the forward record can make a model live.</p></div>';
-  var st2=S?'<div class="tr-study"><p><b>'+esc(S.period)+'</b>: '+esc(S.sample)+'.</p>'+(S.findings||[]).map(function(f){return '<p>'+esc(f)+'</p>';}).join('')+'</div>':'';
-  return sec('How the models are tested',how,'md-how')+(st2?sec('What the candle study found before the first training run',st2,'md-study'):'');
+  var st2='';
+  if(S){
+    var er=(S.entry||[]).map(function(m){var g=m.train_auc!=null&&m.auc!=null?m.train_auc-m.auc:null;
+      return '<tr><td class="l"><b>'+esc(m.algo)+'</b></td><td>'+(m.auc!=null?f3(m.auc)+'<span class="nm">± '+f3(m.auc_sd)+'</span>':'<span class="nm">rank IC</span>'+f2(m.ic))+'</td><td>'+(m.train_auc!=null?f3(m.train_auc):'<span class="nm">rank IC</span>'+f2(m.train_ic))+'</td>'
+        +'<td'+(g>0.15?' class="tr-dn"':'')+'>'+(g==null?'–':(g<0?MINUS:'+')+Math.abs(g).toFixed(3))+'</td><td>'+(m.accuracy==null?'–':pc(m.accuracy*100,1))+'</td><td>'+(m.balanced_acc==null?'–':pc(m.balanced_acc*100,1))+'</td><td>'+(m.brier==null?'–':f3(m.brier))+'</td>'
+        +'<td>'+int(m.picks||0)+'</td><td>'+(m.pick_win==null?'–':pc(m.pick_win*100,0))+'</td><td class="'+(m.pick_net>0?'tr-up':'tr-dn')+'">'+n2(m.pick_net)+tval(m.pick_t)+'</td><td>'+n2(m.base_net)+'</td></tr>';});
+    var xr=(S.exit||[]).map(function(e){return '<tr><td class="l"><b>'+esc(e.algo)+'</b></td><td>'+f3(e.auc)+'</td><td>'+f3(e.train_auc)+'</td><td>'+pc(e.accuracy*100,1)+'</td><td>'+int(e.trades)+'</td><td>'+n2(e.net)+'</td><td>'+n2(e.base_net)+'</td><td class="'+(e.gain>0?'tr-up':'tr-dn')+'">'+(e.gain<0?MINUS:'+')+Math.abs(e.gain).toFixed(2)+' pts'+tval(e.gain_t)+'</td></tr>';});
+    st2='<div class="tr-study"><p><b>'+esc(S.period)+'</b>: '+esc(S.sample)+'.</p>'+(S.findings||[]).map(function(f){return '<p>'+esc(f)+'</p>';}).join('')+'</div>'
+      +(er.length?'<h3 class="sub-h">Every algorithm in the study, out of sample</h3>'+table(['Algorithm','AUC (test)','AUC (training)','Overfit gap','Accuracy','Balanced accuracy','Brier','Picks','Picks won','Picks: average after costs','All test trades'],er,'wide cards'):'')
+      +(xr.length?'<h3 class="sub-h">Exit models in the study</h3>'+table(['Exit model','AUC (test)','AUC (training)','Accuracy','Trades','Following it','+10% target or 8h','Gain'],xr,'cards'):'')
+      +'<p class="fine">Return models are scored by rank IC (the rank correlation of predicted and actual returns) rather than AUC. k nearest neighbours used distance weights in the study, which made it score its own training labels (training AUC 1.000) and pick nothing; the live models use uniform weights.</p>';
+  }
+  return [sec('How the models are tested',how,'md-how'),st2?sec('What the candle study found before the first training run',st2,'md-study'):''];
 }
 
 /* ---- render ---- */
@@ -140,8 +155,10 @@ function render(){
   if(!M){w.innerHTML='<p class="empty">The Models tab fills in with the next scan.</p>';return;}
   var y=window.scrollY;
   var note=!M.available?'<p class="trk-note tr-dn">This scan ran without the machine-learning libraries, so no model scored coins.</p>'
-    :(M.fresh===false&&M.trained_at?'<p class="trk-note tr-dn">The latest models were trained '+esc(ago(M.trained_at,D.generated_at))+', longer ago than the '+((M.cfg||{}).max_age_h||30)+' hours a model may trade on; they open no trades until the next training run.</p>':'');
-  w.innerHTML=head()+note+entrySec()+exitSec()+logSec()+sellLogSec()+howSec();
+    :(M.status==='ok'&&M.fresh===false&&M.trained_at?'<p class="trk-note tr-dn">The latest models were trained '+esc(ago(M.trained_at,D.generated_at))+', longer ago than the '+((M.cfg||{}).max_age_h||30)+' hours a model may trade on; they open no trades until the next training run.</p>':'');
+  var hs=howSec(),trained=(M.entry||[]).length>0;
+  /* until the first models are trained, the study's table of every algorithm comes straight after the status */
+  w.innerHTML=head()+note+entrySec()+(trained?'':hs[1])+exitSec()+logSec()+sellLogSec()+hs[0]+(trained?hs[1]:'');
   $$('[data-tk]',w).forEach(function(b){b.onclick=function(){U.open(b.dataset.tk);};});
   ['set','kind','sort'].forEach(function(k){$$('[data-m'+k+']',w).forEach(function(b){b.onclick=function(){st[k]=b.getAttribute('data-m'+k);save();render();};});});
   $$('table.cards',w).forEach(function(t){var hs=$$('thead th',t).map(function(th){return th.textContent;});
