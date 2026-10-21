@@ -1,0 +1,26 @@
+name: export-db
+# Manual only: copies the scanner's latest saved history (the SQLite file the scan keeps in the Actions cache) into a
+# downloadable artifact, for offline analysis. It only reads the cache, so it never disturbs a running scan.
+on: workflow_dispatch
+permissions:
+  contents: read
+  actions: read
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/cache/restore@v4
+        with:
+          path: state/undertow.db
+          key: undertow-db-never-matches
+          restore-keys: undertow-db-
+      - run: |
+          test -s state/undertow.db || { echo "::error::no saved history in the cache"; exit 1; }
+          gzip -c state/undertow.db > undertow.db.gz
+          ls -la state undertow.db.gz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: undertow-db
+          path: undertow.db.gz
+          retention-days: 2
