@@ -610,6 +610,10 @@ class Snapshots(unittest.TestCase):
         self.assertTrue(page.startswith("<!doctype html>"))
         self.assertIn("supabase-js@2.112.3", page)                       # the GitHub page does
         self.assertIn(".cm-modal", page)
+        for p_ in (frag, page):                                          # the Buy & sell tab is in every build
+            self.assertIn('data-view="trade"', p_)
+            self.assertIn('id="tradewrap"', p_)
+            self.assertIn("function sellState", p_)
         build_page.build(os.path.join(d, "s.html"), fragment=True, split=True)       # the published page: small
         small = pathlib.Path(d, "s.html").read_text()
         self.assertLess(len(small), 12_000)

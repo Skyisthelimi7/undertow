@@ -34,6 +34,30 @@ def review(changes):
            if c["what"] != "testing"])
 
 
+def trade(changes, page, now):
+    """Live paper trades opened or closed by this scan, and the trade review's changes (a rule going live or retiring,
+    the exit switching). Rules still under test never alert."""
+    page = page or {}
+    out = []
+    fresh = [x for x in page.get("open") or [] if abs(x["in_ts"] - now) < 1]
+    if len(fresh) > 5:                    # one message rather than a burst when a live rule matches many coins at once
+        out.append(f"UNDERTOW · {len(fresh)} buy signals (paper) this scan: " + ", ".join(x["sym"] or x["mint"][:6] for x in fresh[:30])
+                   + f"\nExit: {page.get('exit', {}).get('label', '')}\nA rule's paper record, not a recommendation.")
+        fresh = []
+    for x in fresh:
+        lv = x.get("levels") or {}
+        stop = f"; stop {lv['stop']:.3g}" if lv.get("stop") else ""
+        out.append(f"UNDERTOW · buy signal (paper): {x['sym']} at {x['in_price']:.4g}, {_usd(x.get('in_mc'))} market cap"
+                   f"\nRule: {x['rule']}; exit: {page.get('exit', {}).get('label', '')}{stop}"
+                   f"\nhttps://dexscreener.com/solana/{x['mint']}\nA rule's paper record, not a recommendation. Most memecoins go to zero.")
+    for x in page.get("closed") or []:
+        if abs(x["out_ts"] - now) < 1:
+            out.append(f"UNDERTOW · sell signal (paper): {x['sym']} {x['why']} after {x['h']:.1f}h, {x['ret']:+.1f}% after costs"
+                       f"\nhttps://dexscreener.com/solana/{x['mint']}")
+    out += [f"UNDERTOW · trade review: {c['what']} {c['label']}\n{c['reason']}" for c in changes or [] if c["what"] != "testing"]
+    _post(out)
+
+
 def _post(texts):
     token, chat = os.environ.get("TELEGRAM_BOT_TOKEN"), os.environ.get("TELEGRAM_CHAT_ID")
     for text in texts:

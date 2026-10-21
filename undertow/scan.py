@@ -2,9 +2,10 @@
 Run:  python3 -m undertow.scan run --db undertow.db --out docs/data.json
       python3 -m undertow.scan inspect <MINT>"""
 import argparse, csv, json, os, sys, time
+from collections import defaultdict
 from . import config as C, sources as S, gates as G, momentum as M, tgrisk, signals as SG, tracker as TR, notify, http, lab as LAB
-from . import review as REV, community as COM
-from .store import Store, TSNAP_VARS
+from . import review as REV, community as COM, trade as TRD
+from .store import Store, TSNAP_VARS, PATH_STATE
 
 H = 3600.0
 
@@ -460,13 +461,17 @@ def update_outcomes(st, ds_all, now):
     return n
 
 
+def regime_of(rows, sol24):
+    """Market-wide numbers every observation carries: SOL's 24h change and the share of candidates rising over 1h."""
+    rising = [r for r in rows if (r["d"].get("chg") or {}).get("h1") is not None]
+    return {"sol24": sol24, "mkt1h": sum(1 for r in rising if r["d"]["chg"]["h1"] > 0) / len(rising) if rising else None}
+
+
 def observe(st, rows, now, regime):
     """Record observations for the Lab: every entry and exit as it happens, and, checking every candidate once an
     hour, the observations the Lab reads: a token's first of each day, and its first that day that passed every gate."""
     last = st.get_meta("last_obs")
     hourly = not last or now - float(last) >= C.OBS_EVERY_MIN * 60 - 120
-    rising = [r for r in rows if (r["d"].get("chg") or {}).get("h1") is not None]
-    regime = {**(regime or {}), "mkt1h": sum(1 for r in rising if r["d"]["chg"]["h1"] > 0) / len(rising) if rising else None}
     n = 0
     for r in rows:
         frm, to = r.get("moved") or (None, None)
@@ -848,8 +853,8 @@ def export(st, rows, handles, now, meta, out_path):
     symbols = st.symbols()
     write_obs_csv(os.path.join(out_dir, "observations.csv"), lab_rows, symbols)
     n_ts = write_snapshot_files(out_dir, st, symbols)
-    review = meta.pop("review", None)
-    doc = {"generated_at": now, "published_at": time.time(), "lab": lab, "review": review, "meta": {**meta, "counts_in_by_band": counts,
+    review, trade = meta.pop("review", None), meta.pop("trade", None)
+    doc = {"generated_at": now, "published_at": time.time(), "lab": lab, "review": review, "trade": trade, "meta": {**meta, "counts_in_by_band": counts,
            "in": sum(1 for x in toks if x["state"] in ("IN", "WATCH")), "entering": sum(1 for x in toks if x["state"] == "ENTERING"),
            "out_listed": sum(1 for x in toks if x["state"] == "OUT"), "cadence_min": C.SCAN_MINUTES, "snapshots": n_ts},
            "config": {k: getattr(C, k) for k in cfg_keys}, "slots": SLOTS,
@@ -919,6 +924,240 @@ def base_rug_rate(st, now, days=14):
     return sum(rg) / len(rg) if len(rg) >= 50 else None
 
 
+# ------------------------------------------------------------------ buy and sell signals (see trade.py)
+def trade_features(st, r, now, regime):
+    """The variables entry rules read for one candidate: the Lab's, plus the short-term shape of its price from this
+    scanner's own readings over the last day."""
+    d = r["d"]
+    hist = [(s["ts"], s["price"]) for s in st.snaps(r["t"]["mint"], now - 24 * H) if s["price"]]
+    top = max([p for _, p in hist] + [d["price"]])
+    lab_f = LAB.features(d, r["m"], r.get("jup"), r.get("mq"), r.get("momentum"), r.get("tg"),
+                         {**regime, "dd24s": d["price"] / top - 1 if top else None})
+    return TRD.decision_features(lab_f, TRD.path_features(hist, now, d["price"]))
+
+
+def path_code(r):
+    if any(g["hard"] for g in G.blocking(r["gates"])):
+        return "X"
+    return PATH_STATE.get(row_state(r), "O")
+
+
+def seed_tpath(st, now):
+    """Once, when the ledger starts: rebuild the path from the per-scan snapshots still kept (about a day and a half),
+    with each coin's screener state from its transitions, so the first review has something to backtest on. Only the
+    variables a snapshot holds are filled; rules on the others cannot fire on the seeded rows."""
+    if st.get_meta("tpath_seeded") or st.tpath_stats()["rows"]:
+        return 0
+    trans = defaultdict(list)
+    for r in st.db.execute("SELECT ts, mint, to_ FROM transitions ORDER BY ts"):
+        trans[r["mint"]].append((r["ts"], r["to_"]))
+    snaps = defaultdict(list)
+    for r in st.db.execute("SELECT mint, ts, price, mcap, liq, vol24, vol1, chg1, chg6, chg24, buys1, sells1 FROM snaps "
+                           "WHERE price IS NOT NULL AND ts<? ORDER BY mint, ts", (now - 60,)):
+        snaps[r["mint"]].append(dict(r))
+    rows = []
+    for mint, ss in snaps.items():
+        tr, k, state = trans.get(mint, []), 0, None
+        for i, s in enumerate(ss):
+            while k < len(tr) and tr[k][0] <= s["ts"] + 1:
+                state, k = tr[k][1], k + 1
+            code = "I" if state == "IN" else "O"
+            f = None
+            if code == "I":
+                hist = [(x["ts"], x["price"]) for x in ss[:i] if x["ts"] >= s["ts"] - 24 * H]
+                top = max([p for _, p in hist] + [s["price"]])
+                mc, liq, v24 = s["mcap"], s["liq"], s["vol24"]
+                lab_f = {"c1h": s["chg1"], "c6h": s["chg6"], "c24h": s["chg24"], "v1h": s["vol1"], "v24h": v24, "mc": mc, "liq": liq,
+                         "liq_pct": liq / mc if liq and mc else None, "turn": v24 / mc if v24 and mc else None,
+                         "v1h_24": s["vol1"] * 24 / v24 if s["vol1"] is not None and v24 else None,
+                         "bs1h": s["buys1"] / s["sells1"] if s["buys1"] is not None and s["sells1"] else None,
+                         "dd24s": s["price"] / top - 1 if top else None}
+                f = TRD.decision_features(lab_f, TRD.path_features(hist, s["ts"], s["price"]))
+            rows.append((s["ts"], mint, code, s["price"], s["liq"], s["chg1"], f))
+    st.add_tpath(rows)
+    st.set_meta("tpath_seeded", now)
+    st.commit()
+    log(f"trade ledger: path seeded with {len(rows)} rows from the per-scan snapshots")
+    return len(rows)
+
+
+def trade_step(st, rows, ds_all, now, regime):
+    """One scan of the paper ledger: record the path, step every open paper trade, run the weekly review when due,
+    then let the bench's rules fire on coins that pass every gate. Returns (policy, features by coin, changes)."""
+    cfg, exits = C.TRADE, {e["id"]: e for e in C.EXIT_POOL}
+    policy = json.loads(st.get_meta("trade_policy") or "null")
+    seed_tpath(st, now)
+    by = {r["t"]["mint"]: r for r in rows}
+    open_sigs = st.open_sigs()
+    follow = st.tpath_recent(now - cfg["follow_h"] * H) | {s["mint"] for s in open_sigs}
+    feats, path = {}, []
+    for mint, r in by.items():
+        code, d = path_code(r), r["d"]
+        if code not in ("I", "W") and mint not in follow:
+            continue
+        f = trade_features(st, r, now, regime) if code == "I" and d.get("price") else None
+        if f:
+            feats[mint] = f
+        path.append((now, mint, code, d.get("price"), d.get("liq"), (d.get("chg") or {}).get("h1"), f))
+    for mint in follow - set(by):              # left the candidates: followed on price alone
+        d = ds_all.get(mint)
+        if d and d.get("price"):
+            path.append((now, mint, "G", d["price"], d.get("liq"), (d.get("chg") or {}).get("h1"), None))
+    st.add_tpath(path)
+
+    seen = {p[1]: {"price": p[3], "liq": p[4], "c1h": p[5], "hard": p[2] == "X"} for p in path}
+    if ds_all:                                 # a scan that priced nothing (DEX Screener down) steps no trade
+        for s in open_sigs:
+            out, sst, miss, lp, ll, done = TRD.advance(s, seen.get(s["mint"]), now, exits, cfg)
+            ref_out = s.get("ref_out_ts")
+            if ref_out is None and (s["ref"] in out or s["ref"] not in exits):
+                ref_out = out[s["ref"]][3] if s["ref"] in out else now
+            st.update_sig(s["id"], out, sst, miss, lp, ll, done, ref_out)
+
+    changes = []
+    if TRD.due(policy, now, cfg):
+        fwd = defaultdict(list)
+        for s in st.sigs():
+            fwd[s["rule"]].append({"mint": s["mint"], "in_ts": s["in_ts"], "live": s["live"],
+                                   "out": {pid: o[0] for pid, o in (s["out"] or {}).items()}})
+        policy, changes = TRD.run_review(policy, st.tpath(now - cfg["path_days"] * 86400), fwd, now, cfg,
+                                         C.ENTRY_POOL, C.EXIT_POOL, C.DEFAULT_EXIT, C.SELL_WARNINGS)
+        st.set_meta("trade_policy", json.dumps(policy))
+        log(f"trade review: {len(changes)} changes; live exit {policy['exit']}; "
+            f"{sum(1 for x in policy['rules'] if x['status'] == 'live')} live rules")
+
+    opened = 0
+    if policy:
+        busy, held = st.busy_rules(now, cfg["reentry_h"]), st.live_open_mints()
+        for mint, f in feats.items():
+            d = by[mint]["d"]
+            for rule in policy["rules"]:
+                if rule["status"] not in ("testing", "live") or (rule["id"], mint) in busy or not TRD.fires(rule, f):
+                    continue
+                live = rule["status"] == "live" and mint not in held
+                keep = {k: f.get(k) for k in TRD.SHOWN_AT_ENTRY + [c[0] for c in rule["all"]] if f.get(k) is not None}
+                st.add_sig(rule["id"], mint, d.get("symbol") or by[mint]["t"]["symbol"], now, d["price"], d.get("liq"),
+                           d.get("mcap"), keep, policy["exit"], live, TRD.start_states(d["price"], exits))
+                opened += 1
+                if live:
+                    held.add(mint)
+    st.prune_tpath(now - cfg["path_days"] * 86400)
+    st.prune_sigs(now - cfg["keep_days"] * 86400)
+    st.commit()
+    log(f"trade ledger: {len(path)} path rows, {len(open_sigs)} open paper trades stepped, {opened} opened")
+    return policy, feats, changes
+
+
+def trade_page(st, policy, feats, rows, now):
+    """What the Buy & sell tab shows. Open trades carry their exit levels so the page can flag a sell between scans."""
+    if not policy:
+        return None
+    cfg, exits = C.TRADE, {e["id"]: e for e in C.EXIT_POOL}
+    by = {r["t"]["mint"]: r for r in rows}
+    sigs = st.sigs(now - cfg["window_days"] * 86400)
+    live_ids = [r["id"] for r in policy["rules"] if r["status"] == "live"]
+    rules = {r["id"]: r for r in policy["rules"]}
+
+    def trade_row(s):
+        ref = exits.get(s["ref"]) or exits[policy["exit"]]
+        o = (s["out"] or {}).get(s["ref"])
+        peak = ((s["st"] or {}).get(s["ref"]) or {}).get("peak") or s["in_price"]
+        row = {"id": s["id"], "mint": s["mint"], "sym": s["sym"], "rule": s["rule"], "in_ts": s["in_ts"],
+               "in_price": s["in_price"], "in_mc": s["in_mc"], "in_liq": s["in_liq"], "exit": s["ref"], "f": s["f"]}
+        if o:
+            row.update(ret=o[0], h=o[1], why=o[2], out_ts=o[3], out_price=o[4])
+        else:
+            last = s.get("last_price") or s["in_price"]
+            row.update(last_price=last, peak=peak, now_x=last / s["in_price"],
+                       now_net=LAB._r(TRD.net_ret(last / s["in_price"], s["in_liq"], s.get("last_liq"), cfg)),
+                       levels=TRD.levels(ref, s, peak))
+        return row
+
+    # a live trade whose exit policy has since left the bench cannot be valued any further; it drops off the page
+    live = [trade_row(s) for s in sigs if s["live"] and (s["ref"] in exits or s["ref"] in (s["out"] or {}))]
+    open_live = [x for x in live if "ret" not in x]
+    closed_live = sorted([x for x in live if "ret" in x], key=lambda x: -x["out_ts"])
+    # the record counts a trade once every trade opened at that time has had time to close (see trade.matured)
+    rec = TRD.summarise([{"mint": x["mint"], "ret": x["ret"], "in_ts": x["in_ts"], "h": x["h"]} for x in closed_live
+                         if TRD.matured(x["in_ts"], exits.get(x["exit"]) or exits[policy["exit"]], now)])
+
+    # every rule's forward record under the live exit, recomputed each scan so the page is current between reviews
+    fwd = defaultdict(list)
+    n_open = defaultdict(int)
+    live_exit = exits[policy["exit"]]
+    for s in sigs:
+        o = (s["out"] or {}).get(policy["exit"])
+        if o and TRD.matured(s["in_ts"], live_exit, now):
+            fwd[s["rule"]].append({"mint": s["mint"], "ret": o[0], "in_ts": s["in_ts"], "h": o[1]})
+        if s["ref"] not in (s["out"] or {}):
+            n_open[s["rule"]] += 1
+    bench = []
+    for r in policy["rules"]:
+        since = r.get("since") if r["status"] == "live" else r.get("added")
+        fs = TRD.summarise([t for t in fwd.get(r["id"], []) if t["in_ts"] >= (since or 0)])
+        bench.append({k: r.get(k) for k in ("id", "label", "all", "status", "source", "added", "since", "reason", "last", "streak")}
+                     | {"fwd_now": TRD._r(fs), "open": n_open.get(r["id"], 0)})
+
+    # this scan: which coins each rule fires on, and how close the coins come to the rules that matter most
+    firing = defaultdict(list)
+    for mint, f in feats.items():
+        for r in policy["rules"]:
+            if r["status"] in ("testing", "live") and TRD.fires(r, f):
+                firing[mint].append(r["id"])
+
+    def score(b):        # the forward record once it has 10 matured trades, else the backtest (as the page ranks them)
+        f, bt = b.get("fwd_now") or {}, (b.get("last") or {}).get("bt") or {}
+        return f["mean"] if f.get("n", 0) >= 10 else (bt["mean"] if bt.get("n") else None)
+    lead = live_ids or [b["id"] for b in sorted((b for b in bench if b["status"] == "testing" and score(b) is not None),
+                                                key=lambda b: -score(b))[:3]]
+    near = []
+    for mint, f in feats.items():
+        for rid in lead:
+            miss = TRD.unmet(rules[rid], f)
+            if len(miss) == 1:
+                near.append({"mint": mint, "rule": rid, "miss": [list(m) for m in miss]})
+    signals = []
+    for mint, ids in firing.items():
+        d = by[mint]["d"]
+        signals.append({"mint": mint, "sym": d.get("symbol") or by[mint]["t"]["symbol"], "price": d.get("price"),
+                        "mc": d.get("mcap"), "liq": d.get("liq"), "rules": ids, "live": any(i in live_ids for i in ids),
+                        "f": {k: feats[mint].get(k) for k in TRD.SHOWN_AT_ENTRY}})
+
+    # sell-side warnings: states that were followed by falls, judged at each review on coins passing every gate
+    warn = []
+    wrec = {w["id"]: w for w in policy.get("warnings") or []}
+    for mint, f in feats.items():
+        hit = [w["id"] for w in C.SELL_WARNINGS if TRD.fires(w, f)]
+        if hit:
+            d = by[mint]["d"]
+            warn.append({"mint": mint, "sym": d.get("symbol") or by[mint]["t"]["symbol"], "ids": hit,
+                         "f": {k: f.get(k) for k in ("ru6", "dd6", "r15", "c1h", "c6h")}})
+
+    # every exit policy on the same settled forward trades
+    entries = TRD.pooled({rid: [{"mint": s["mint"], "in_ts": s["in_ts"], "out": {p: o[0] for p, o in (s["out"] or {}).items()}}
+                                for s in sigs if s["rule"] == rid and s["out"]] for rid in rules})
+    cmp_ = TRD.compare_exits(entries, policy["exit"], cfg, exits, now) if entries else {}
+    ex = [{"id": e["id"], "label": TRD.exit_label(e), "live": e["id"] == policy["exit"], "now": cmp_.get(e["id"]),
+           "last": (policy["exits"].get(e["id"]) or {}).get("last"), "reason": (policy["exits"].get(e["id"]) or {}).get("reason"),
+           "streak": (policy["exits"].get(e["id"]) or {}).get("streak"), "params": {k: v for k, v in e.items() if k not in ("id", "label")}}
+          for e in C.EXIT_POOL]
+
+    labels = {k: (l, u) for k, l, u in TRD.VARIABLES}
+    variables = [{"key": k, "label": labels.get(k, (k, ""))[0], "unit": labels.get(k, (k, ""))[1], **v}
+                 for k, v in (policy.get("vars") or {}).items()]
+    return {"cfg": {k: cfg[k] for k in ("usd", "fee_pct", "reentry_h", "min_trades", "min_edge", "z", "promote_after",
+                                        "retire_after", "every_days", "path_days", "switch_after", "switch_min_gain",
+                                        "var_min_rho", "warn_gap")},
+            "last_review": policy.get("last_review"), "next_review": policy.get("next_review"),
+            "exit": {"id": policy["exit"], "label": TRD.exit_label(exits[policy["exit"]]),
+                     "params": {k: v for k, v in exits[policy["exit"]].items() if k not in ("id", "label")}},
+            "live_rules": live_ids, "signals": signals, "near": near[:40], "open": open_live, "closed": closed_live[:80],
+            "record": TRD._r(rec), "bench": bench, "exits": ex, "vars": variables, "warnings": warn,
+            "warning_rules": [{**w, "last": (wrec.get(w["id"]) or {}).get("last")} for w in C.SELL_WARNINGS],
+            "log": list(reversed(policy.get("log") or []))[:40], "path": st.tpath_stats(),
+            "study": C.TRADE_STUDY}
+
+
 def backfill(st):
     """Start trackers for tokens that entered before the tracker existed."""
     for mint, ts, price, mcap, n in st.first_entry_backfill():
@@ -944,9 +1183,11 @@ def run(args):
     policy = json.loads(st.get_meta("policy") or "null")
     crowd = COM.crowd() if COM.enabled() else {}
     rows, handles, events, status = process(st, now, toks, args.max_enrich, ds_all, jcache, policy, crowd)
-    n_obs = observe(st, rows, now, {"sol24": (sol.get("chg") or {}).get("h24")})
+    regime = regime_of(rows, (sol.get("chg") or {}).get("h24"))
+    n_obs = observe(st, rows, now, regime)
     log(f"lab: {n_obs} observations recorded, {n_up} open ones updated")
     policy, gmeta, changes = weekly_review(st, rows, now, policy)
+    tpolicy, tfeats, tchanges = trade_step(st, rows, ds_all, now, regime)
     rate = base_rug_rate(st, now)
     community = COM.sync(rows, ds_all, now, rate) if COM.enabled() else "off: no SUPABASE_SECRET_KEY"
     log("community: " + community)
@@ -959,11 +1200,14 @@ def run(args):
     meta["call_base_rate"] = round(COM.base_rate(rate), 4)       # what rug calls are scored against (see community.py)
     meta["call_base_rate_measured"] = rate is not None             # False: the default, until a fortnight has settled
     meta["community"] = community
+    tpage = trade_page(st, tpolicy, tfeats, rows, now)
+    meta["trade"] = tpage
     doc = export(st, rows, handles, now, meta, args.out)
     write_csv(os.path.join(os.path.dirname(os.path.abspath(args.out)), "tracker.csv"), tracker_rows(st, rows, now))
     st.close()
     notify.send(events)
     notify.review(changes)
+    notify.trade(tchanges, tpage, now)
     return doc
 
 

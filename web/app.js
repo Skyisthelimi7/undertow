@@ -457,6 +457,7 @@ function renderXray(k){
     +'<button class="xr-close" type="button" aria-label="Close X-ray" id="xr-close">✕</button></div>'
     +'<p class="verdict">'+esc(verdict(k))+'</p>'
     +'<div class="figs"><div class="fig"><div class="k">Market cap</div><div class="v" data-lv="cap">'+usd(k.cap)+'</div><div class="s">float '+usd(k.fl)+'</div></div><div class="fig"><div class="k">24h volume</div><div class="v" data-lv="vol24">'+usd(k.vol24)+'</div><div class="s">'+(k.cap?(k.vol24/k.cap).toFixed(1)+'× market cap':'')+'</div></div><div class="fig"><div class="k">Liquidity</div><div class="v" data-lv="liq">'+usd(k.liq)+'</div><div class="s">'+(k.cap?pc(k.liq/k.cap*100)+' of market cap':'')+'</div></div><div class="fig"><div class="k">Holders</div><div class="v">'+int(k.holders)+'</div><div class="s">1h '+spct(k.chg&&k.chg.h1)+' · 24h '+spct(k.chg&&k.chg.h24)+'</div></div></div>'
+    +'<section class="xr-sec" id="xr-trade" hidden></section>'
     +sinceBlock(k.tracker,D.generated_at)
     +studySec(k)
     +'<section class="xr-sec"><h3>Gates</h3>'+gateGroups(k)+'</section>'
@@ -790,8 +791,9 @@ function renderHow(){
    +'<p>The six flags: liquidity under '+R.lfdv+'× FDV, over '+R.wallets_10m+' wallets trading in 10 minutes, sells under '+pc(R.sell_share*100,0)+' of recent volume, younger than '+R.age_min+' minutes, over '+R.holders+' holders, and the top 5 buyers under '+pc(R.top5_share*100,0)+' of buying. Out of sample, coins with 0, 2 and 4 flags rugged '+pc(RR[0],0)+', '+pc(RR[2],0)+' and '+pc(RR[4],0)+' of the time'+(dlo!=null?', while '+pc(dlo,0)+' to '+pc(dhi,0)+' doubled at every count':'')+'. Rates are shown, and the count gates, only for coins under '+(CFG.CALIBRATED_MAX_AGE_H||24)+' hours old and under '+cfgUsd(CFG.CALIBRATED_MAX_FDV)+' FDV, which is what the study covered. The study’s thresholds came from three weeks of one market; the tracker records the same day-one outcome for every entry so they can be re-checked here.</p></div>'
    +'<div><h3>Entering, leaving and the tracker</h3><p>A token enters after '+CFG.ENTER_SCANS+' clean scans in a row and leaves after '+CFG.EXIT_SCANS+' failed ones. Tokens already inside get a little slack on each limit so one that hovers on a line does not flicker. Everything outside sits in the waiting room with the gates blocking it, and re-enters by the same rule.</p><p>The first entry starts a tracker: market cap at entry, now, and the ATH since entry with its time, the multiple at +1h, +6h, +24h and +7d, and whether the coin rugged or doubled on day one by the study’s definitions. It keeps following each token for '+(CFG.TRACK_DAYS||14)+' days, including after it drops out, so the scorecard counts the failures too.</p><p>Once an hour it also snapshots every tracked token: market cap, liquidity, volume, net buying, wallets, holders, top-10 share, organic score, liquidity ÷ FDV, the multiple of the entry price and the screener state. Snapshots are hourly for the first '+(CFG.TSNAP_FULL_H||72)+' hours after entry and every six hours after that. The tracker’s Hour by hour view lines every token up at its entry so they can be compared, and each X-ray shows its own snapshots.</p><p>Tile size is float cap: market cap less what the top 10 wallets hold. With All bands selected, each band’s area follows its token count so the largest tokens do not swamp the smallest.</p></div>'
    +'<div><h3>The Lab</h3><p>Every candidate is checked once an hour. The Lab keeps each token’s first observation of the day and its first that passed every gate, and every entry and exit as it happens, with about 45 variables: size, liquidity, volume over 5 minutes to 24 hours and its pace, price changes, buy and sell counts, net buying, traders, holders and their change, organic score, holder concentration, the rug-study signals, momentum and the market backdrop (SOL’s 24h change and the share of candidates rising). Later scans record what happened next: the multiple at +1h, +6h and +24h, the day’s high and low, and when it first reached +10% to +100% or fell 10% to 80%.</p><p>The Lab view scores every variable, '+((D.lab||{}).rules||[]).length+' shadow rules (candidate gates recorded for every observation but never applied) and 25 take-profit and stop pairs. A token counts once a day, verdicts wait for '+(((D.lab||{}).cfg||{}).min_n||60)+' observations in a view, and every suggested line is tested on later data than it was found on.</p></div>'
+   +'<div><h3>Buy and sell signals</h3><p>The Buy &amp; sell tab is a paper ledger. Each scan, every coin that passes every gate is checked against a bench of entry rules; a rule that fires opens a paper trade, and later scans price it under every exit policy on the bench, after fees and price impact. A rule becomes a live buy signal only on trades it made after it joined the bench, and only once they clear costs in two weekly reviews in a row. Sell signals come from the live exit policy, applied to the live price, and from warnings about states that were followed by falls, such as a coin up 30% or more from its 6-hour low.</p></div>'
    +'<div><h3>Where the data comes from, and its limits</h3><p>Free sources only. Jupiter: discovery lists covering every launchpad and DEX, the launchpad and graduation time, holders, audit flags, net buying, traders, organic score, deployer history and sell quotes. GeckoTerminal: hourly pool lists for PumpSwap, Raydium, Meteora and Orca, sectors, liquidity locks, 5-minute candles and a pool’s last 300 trades. DEX Screener: price, volume, liquidity, FDV, pool type and socials. Solana’s public RPC: mint and freeze authority and Token-2022 extensions, straight from the chain. RugCheck: holders with pools and exchanges removed, wallet links and the groups they form, the deployer’s balance and the rugged flag. GoPlus Security: a second reading of authorities and Token-2022 traps, and whether name and image can still change. SolSniffer’s score and InsightX’s cluster maps need paid keys for a screener’s volume of checks, so the X-ray links to both instead. When RugCheck cannot be reached, holder shares come from Jupiter and the wallet-link and bundle checks are skipped and marked as such. Public Telegram pages give member and online counts; X needs a paid key, so only the handle is used.</p>'
-   +'<p>Trade lists, which the wallet and buyer flags need, are fetched for up to '+(CFG.TRADES_BUDGET||30)+' coins a run, all inside the study’s range. For a busy coin the last 300 trades can cover less than 10 minutes, so its 10-minute wallet count is scaled up and marked as estimated. The study’s copycat-ticker check is left out: the free search returns at most 20 matches, too few to count reliably. Coins still on a bonding curve are out of scope until they reach a pool, and stablecoins, staked SOL and tokenised stocks are excluded. The free candle feed reaches back 24 hours, so an outage longer than a day loses that day’s highs. Telegram bot-risk and the momentum labels are heuristics that have not been calibrated against outcomes.</p></div>';
+   +'<p>Trade lists, which the wallet and buyer flags need, are fetched for up to '+(CFG.TRADES_BUDGET||30)+' coins a run, all inside the study’s range. For a busy coin the last 300 trades can cover less than 10 minutes, so its 10-minute wallet count is scaled up and marked as estimated. The study’s copycat-ticker check is left out: the free search returns at most 20 matches, too few to count reliably. Coins still on a bonding curve are out of scope until they reach a pool, and stablecoins, staked SOL and tokenised stocks are excluded. The free candle feed reaches back about three and a half days for an active pool; the tracker treats an outage of over a day as lost. Telegram bot-risk and the momentum labels are heuristics that have not been calibrated against outcomes.</p></div>';
 }
 function sizeNote(){
   $('#size-note').innerHTML='Tiles are sized by <b>'+(state.size==='float'?'float cap':(state.size==='mcap'?'market cap':'24h volume'))+'</b>. Float cap is market cap less what the top 10 wallets hold, so concentrated tokens shrink. <button type="button" id="replay">Replay the float shift</button>';
@@ -799,13 +801,13 @@ function sizeNote(){
 }
 
 /* ---------- orchestration ---------- */
-function show(view){mapEl.hidden=view!=='map';$('#tablewrap').hidden=view!=='table';$('#trackwrap').hidden=view!=='tracker';$('#waitwrap').hidden=view!=='wait';$('#labwrap').hidden=view!=='lab';var cw=$('#callerswrap');if(cw)cw.hidden=view!=='callers';}
+function show(view){mapEl.hidden=view!=='map';$('#tablewrap').hidden=view!=='table';$('#trackwrap').hidden=view!=='tracker';$('#waitwrap').hidden=view!=='wait';$('#labwrap').hidden=view!=='lab';$('#tradewrap').hidden=view!=='trade';var cw=$('#callerswrap');if(cw)cw.hidden=view!=='callers';}
 function refresh(animate){
   var v=state.view,isMap=v==='map';
   $('#grp-ctl').hidden=state.band==='all'||!isMap;
   ['#ctl-size','#ctl-colour','#ctl-showband','#size-note','#caption','#legend'].forEach(function(s){$(s).hidden=!isMap;});
-  $('#ctl-band').hidden=v==='tracker'||v==='lab'||v==='callers';
-  $('#ctl-pos').hidden=!(isMap||v==='table');
+  $('#ctl-band').hidden=v==='tracker'||v==='lab'||v==='callers'||v==='trade';
+  $('#ctl-pos').hidden=!(isMap||v==='table'||v==='trade');
   var blank=$('#mapblank');if(blank)blank.remove();
   show(state.view);
   if(state.view==='map'){place(animate);
@@ -813,7 +815,7 @@ function refresh(animate){
   else if(state.view==='table')renderTable();
   else if(state.view==='tracker')renderTracker();
   else if(state.view==='lab')renderLab();
-  else if(state.view==='callers')emit('view','callers');
+  else if(state.view==='callers'||state.view==='trade')emit('view',state.view);
   else renderWait();
   sizeNote();
 }
@@ -857,6 +859,7 @@ function boot(data){
 
 /* ---------- freshness: when the last scan ran and how often the scheduler runs it ---------- */
 var LIVE={on:false,ts:0,fails:0,timer:null,tick:null,busy:false,turn:0,pos:[0,0],paint:0,src:'dexscreener',err:'',jn:0};
+var EXTRA=[];      /* coins another view wants priced as often as the map's (open paper trades, current signals) */
 function cadenceMin(){return (D&&D.meta&&D.meta.cadence_min)||CFG.SCAN_MINUTES||20;}
 function hhmm(ts){return new Date(ts*1000).toISOString().slice(11,16)+' UTC';}
 function renderStamp(){
@@ -881,6 +884,7 @@ function chunk(a,n){var o=[];for(var i=0;i<a.length;i+=n)o.push(a.slice(i,i+n));
 function liveQueues(){
   var pri=IN.map(function(k){return k.id;}),seen={};pri.forEach(function(m){seen[m]=1;});
   if(state.selected&&!seen[state.selected]){pri.unshift(state.selected);seen[state.selected]=1;}
+  EXTRA.forEach(function(m){if(!seen[m]){pri.push(m);seen[m]=1;}});
   return [chunk(pri,30),chunk(TRK.map(function(x){return x.mint;}).filter(function(m){return !seen[m];}),30)];
 }
 function mergeLive(arr){
@@ -960,7 +964,7 @@ function pollLive(){
   var q=liveQueues(),w=(LIVE.turn++%4===3&&q[1].length)?1:0;if(!q[w].length)w=1-w;if(!q[w].length)return schedLive();
   var i=LIVE.pos[w]%q[w].length;LIVE.pos[w]=i+1;LIVE.busy=true;
   fetchLive(LIVE.src,q[w][i])
-    .then(function(moved){LIVE.on=true;LIVE.ts=Date.now()/1000;LIVE.fails=0;LIVE.err='';renderStamp();repaintLive(moved);
+    .then(function(moved){LIVE.on=true;LIVE.ts=Date.now()/1000;LIVE.fails=0;LIVE.err='';renderStamp();repaintLive(moved);emit('live',moved);
       if(LIVE.src==='jupiter'&&++LIVE.jn%12===0)LIVE.src='dexscreener';})  /* about once a minute, try DEX Screener again: it has volume and 1h change */
     .catch(function(e){LIVE.fails++;LIVE.err=String((e&&e.message)||'no answer');
       LIVE.src=LIVE.src==='dexscreener'?'jupiter':'dexscreener';
@@ -1018,7 +1022,12 @@ function emit(ev,arg){(HOOKS[ev]||[]).forEach(function(fn){try{fn(arg);}catch(e)
 window.Undertow={cfg:function(){return CFG;},data:function(){return D;},token:function(id){return byId[id];},
   selected:function(){return xr.hidden?null:state.selected;},view:function(){return state.view;},
   setView:function(v){state.view=v;syncSeg('view');refresh(false);},inClaude:IN_CLAUDE,served:SERVED,
-  on:function(ev,fn){(HOOKS[ev]=HOOKS[ev]||[]).push(fn);},toast:toast,esc:esc,usd:usd,pc:pc,ago:ago,when:when,xm:xm,int:int};
+  on:function(ev,fn){(HOOKS[ev]=HOOKS[ev]||[]).push(fn);},toast:toast,esc:esc,usd:usd,pc:pc,ago:ago,when:when,xm:xm,int:int,
+  spct:spct,ageH:ageH,dur:dur,tracked:function(id){return trkBy[id];},open:function(id){openX(id);},posSize:function(){return state.pos;},
+  /* the latest price the page has for a coin: the live feed's when it has one, else the scan's */
+  price:function(id){var k=byId[id],x=trkBy[id];if(k&&k.price)return {price:k.price,liq:k.liq,c1h:k.chg&&k.chg.h1,live:LIVE.on};
+    if(x&&x.in_price&&x.now_x)return {price:x.now_x*x.in_price,liq:null,c1h:null,live:LIVE.on&&!!x.live_ts};return null;},
+  prioritise:function(list){EXTRA=(list||[]).slice(0,60);},liveOn:function(){return LIVE.on;},downloadButton:dlBtn};
 window.__undertow=1;
 start();
 })();

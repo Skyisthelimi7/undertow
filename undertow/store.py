@@ -31,7 +31,18 @@ CREATE TABLE IF NOT EXISTS tsnap(
   mc REAL, liq REAL, v1h REAL, v6h REAL, v24h REAL, c1h REAL, bs1h REAL, nf1h REAL, tr1h REAL, brd1h REAL,
   hold REAL, hc1h REAL, top10 REAL, org REAL, lfdv REAL);
 CREATE INDEX IF NOT EXISTS ix_tsnap ON tsnap(mint, ts);
+CREATE TABLE IF NOT EXISTS tpath(ts REAL, mint TEXT, st TEXT, price REAL, liq REAL, c1h REAL, f TEXT);
+CREATE INDEX IF NOT EXISTS ix_tpath ON tpath(mint, ts);
+CREATE INDEX IF NOT EXISTS ix_tpath_ts ON tpath(ts);
+CREATE TABLE IF NOT EXISTS tsig(id INTEGER PRIMARY KEY AUTOINCREMENT, rule TEXT, mint TEXT, sym TEXT, in_ts REAL,
+  in_price REAL, in_liq REAL, in_mc REAL, f TEXT, ref TEXT, live INTEGER DEFAULT 0, out TEXT, st TEXT,
+  miss INTEGER DEFAULT 0, last_price REAL, last_liq REAL, done INTEGER DEFAULT 0, ref_out_ts REAL);
+CREATE INDEX IF NOT EXISTS ix_tsig_open ON tsig(done, mint);
+CREATE INDEX IF NOT EXISTS ix_tsig_rule ON tsig(rule, mint);
 """
+# tpath states: I passed every gate, W on watch (failing a soft gate once), E entering, O out, X failed a structure
+# gate this scan, G not a candidate this scan (out of range or unpriced: price only)
+PATH_STATE = {"IN": "I", "WATCH": "W", "ENTERING": "E", "OUT": "O"}
 OBS_OUT = ("p1", "p6", "p24", "hi", "lo", "up50_ts", "dn80_ts", "x2_ts", "cross", "done")
 # The tracker's hourly snapshot: keys follow lab.VARIABLES so labels and units are shared with the Lab.
 TSNAP_VARS = ("mc", "liq", "v1h", "v6h", "v24h", "c1h", "bs1h", "nf1h", "tr1h", "brd1h", "hold", "hc1h", "top10", "org", "lfdv")
@@ -218,6 +229,69 @@ class Store:
         self.db.execute("""DELETE FROM tsnap WHERE h>? AND ev!='entry' AND rowid NOT IN (
                              SELECT MIN(rowid) FROM tsnap WHERE h>? AND ev!='entry'
                              GROUP BY mint, CAST((h-?)/6 AS INTEGER))""", (full_h, full_h, full_h))
+
+    # ---- buy and sell signals: the path each scan, and every paper trade ---------------------------
+    def add_tpath(self, rows):
+        """rows: (ts, mint, state, price, liq, c1h, features or None)."""
+        self.db.executemany("INSERT INTO tpath VALUES(?,?,?,?,?,?,?)",
+                            [(*r[:6], json.dumps(r[6], separators=(",", ":")) if r[6] else None) for r in rows])
+
+    def tpath(self, since):
+        """{mint: [(ts, state, price, liq, c1h, features)]} ascending, since `since`."""
+        out = {}
+        for r in self.db.execute("SELECT ts, mint, st, price, liq, c1h, f FROM tpath WHERE ts>=? ORDER BY mint, ts", (since,)):
+            out.setdefault(r["mint"], []).append((r["ts"], r["st"], r["price"], r["liq"], r["c1h"], json.loads(r["f"]) if r["f"] else None))
+        return out
+
+    def tpath_recent(self, since):
+        """Coins that passed every gate (or were on watch) at some scan since `since`."""
+        return {r[0] for r in self.db.execute("SELECT DISTINCT mint FROM tpath WHERE ts>=? AND st IN ('I','W')", (since,))}
+
+    def tpath_stats(self):
+        r = self.db.execute("SELECT COUNT(*), MIN(ts), COUNT(DISTINCT mint), SUM(st='I') FROM tpath").fetchone()
+        return {"rows": r[0], "since": r[1], "coins": r[2], "passing_rows": r[3] or 0}
+
+    def prune_tpath(self, before):
+        self.db.execute("DELETE FROM tpath WHERE ts<?", (before,))
+
+    _SIG_JSON = ("f", "out", "st")
+
+    def _sig(self, r):
+        d = dict(r)
+        for k in self._SIG_JSON:
+            d[k] = json.loads(d[k]) if d.get(k) else {}
+        return d
+
+    def add_sig(self, rule, mint, sym, ts, price, liq, mc, f, ref, live, st):
+        cur = self.db.execute("""INSERT INTO tsig(rule,mint,sym,in_ts,in_price,in_liq,in_mc,f,ref,live,out,st,last_price,last_liq)
+                                 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                              (rule, mint, sym, ts, price, liq, mc, json.dumps(f, separators=(",", ":")), ref, 1 if live else 0,
+                               "{}", json.dumps(st, separators=(",", ":")), price, liq))
+        return cur.lastrowid
+
+    def update_sig(self, sid, out, st, miss, last_price, last_liq, done, ref_out_ts):
+        self.db.execute("UPDATE tsig SET out=?, st=?, miss=?, last_price=?, last_liq=?, done=?, ref_out_ts=? WHERE id=?",
+                        (json.dumps(out, separators=(",", ":")), json.dumps(st, separators=(",", ":")), miss, last_price,
+                         last_liq, 1 if done else 0, ref_out_ts, sid))
+
+    def open_sigs(self):
+        return [self._sig(r) for r in self.db.execute("SELECT * FROM tsig WHERE done=0")]
+
+    def sigs(self, since=0):
+        return [self._sig(r) for r in self.db.execute("SELECT * FROM tsig WHERE in_ts>=? ORDER BY in_ts", (since,))]
+
+    def busy_rules(self, now, reentry_h):
+        """{(rule, mint)} that cannot open a new trade: the rule's last trade on the coin is still open under the
+        policy that governs it, or it opened less than reentry_h hours ago."""
+        q = """SELECT rule, mint FROM tsig WHERE ref_out_ts IS NULL OR in_ts>?"""
+        return {(r[0], r[1]) for r in self.db.execute(q, (now - reentry_h * 3600,))}
+
+    def prune_sigs(self, before):
+        """Settled paper trades of rules that were not live when they opened, once older than `before`."""
+        self.db.execute("DELETE FROM tsig WHERE in_ts<? AND live=0 AND done=1", (before,))
+
+    def live_open_mints(self):
+        return {r[0] for r in self.db.execute("SELECT DISTINCT mint FROM tsig WHERE live=1 AND ref_out_ts IS NULL")}
 
     # ---- tracker ---------------------------------------------------------------------------
     def set_cols(self, mint, **kw):

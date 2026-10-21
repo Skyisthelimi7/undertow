@@ -204,6 +204,45 @@ log of each change and why it happened; changes are also posted to Telegram when
 "collecting" for most gates in the first weeks: a gate needs 30 settled coins that it alone blocked, and most gates
 rarely block a coin on their own.
 
+## Buy & sell: rules that have to earn a signal
+
+The Buy & sell tab is a paper ledger, not advice. Every scan, each coin that passes every gate is checked against a
+bench of entry rules (`ENTRY_POOL` in the config, `undertow/trade.py`). A rule that fires opens a paper trade at that
+scan's price; every later scan steps the trade through every exit policy on the bench (`EXIT_POOL`), so one entry has
+a result under each way of selling it. Results are after a 1% fee allowance a side plus price impact on a $500
+position (`TRADE` in the config), priced once a scan, so a stop fills at the next scan's price rather than at its level.
+
+* **Live buy signals.** A rule goes live only on its forward record: trades opened after it joined the bench, which it
+  was never fitted to. It needs at least 30 matured trades averaging +1% or better after costs with t ≥ 2 (errors
+  clustered by coin), in two weekly reviews in a row, and a backtest on the stored path that does not disagree. A live
+  rule is taken off after two reviews of a losing record, or at once if the loss is clear. Until a rule is live its
+  matches show as "under test", never as buy signals.
+* **Sell signals.** Each live paper trade carries the live exit policy's levels (target, stop, trailing stop, time
+  limit). The page applies them to the live price feed between scans and flags a sell; the ledger records the sale at
+  the next scan. Separately, sell-side warnings flag coins in states that were followed by falls (for example, up 30%
+  or more from the 6-hour low), re-measured at every review.
+* **Exits.** The live exit switches when another policy beat it on the same entries by at least a point, with t ≥ 2, in
+  two reviews in a row. Each pair is compared only on entries old enough for both to have closed every trade.
+* **Variables and new rules.** Each review scores about 45 variables on every gate-passing reading: does the variable
+  separate coins that rose over the next 4 hours from those that fell, the same way in both halves of the window?
+  Variables that do seed new rules; ones with no signal in three reviews in a row stop seeding rules until a later
+  check. The bench holds 24 rules; up to four new ones join each week as others retire (losing twice, or firing too
+  rarely to judge in six reviews), and retired rules come back for another test after 8 weeks.
+* **Fair counting.** A trade counts once every trade opened at that time has had time to close under the policy, so
+  quick winners are never counted while slow losers are still open. A rule trades a coin at most once a day.
+
+**What the history said before the first trade.** The first bench came from replaying the scanner's history on
+GeckoTerminal's 5-minute candles: 493 coins in range from 18 to 21 October 2026, each from the moment the scanner
+first saw it, priced every 15 minutes as a scan would. Pushes cooled off: coins up 30-60% from their 6-hour low fell
+8.2% on average over the next 4 hours (68% no higher); up 60-100%, 12.1%. No buy rule cleared costs at $500 (a side
+cost a median 2.2%), and the least bad, coins not pushed with deep pools, lost about 1.7-1.8% a trade. Taking profit
+at +10% within 8 hours beat holding (-5.4% against -8.9% a trade); stops on their own changed little. All of it comes
+from one falling market, which is why the bench keeps testing forward. The tab shows the full summary.
+
+To use it: open **Buy & sell**. With no live rule, it shows what the leading rules under test match, the coins in a
+warning state, and every rule's record. Telegram alerts (when set up) post live buy and sell signals and review
+changes; rules under test never alert.
+
 ## Rug calls, votes and tags
 
 From a token's X-ray, signed-in visitors can:
@@ -280,6 +319,7 @@ the page shows when the last scan ran and warns when one is overdue.
     undertow/tgrisk.py     Telegram bot-risk heuristic (pure)
     undertow/momentum.py   percentile-rank momentum (pure)
     undertow/review.py     the weekly gate review: verdicts, drops, promotions, the testing bench (pure)
+    undertow/trade.py      buy and sell signals: entry rules, exit policies, paper trades, the weekly trade review (pure)
     undertow/community.py  the scan's side of rug calls: list tokens, price and settle calls, read the crowd
     undertow/notify.py     optional Telegram alerts
     undertow/store.py      SQLite
@@ -287,7 +327,11 @@ the page shows when the last scan ran and warns when one is overdue.
     undertow/cloud.py      the claude.ai copy's cycle: restore the saved state, scan once, build, review, save the state
     seed/undertow.db.gz    the history a fresh GitHub Actions cache starts from
     supabase/schema.sql    tables, security rules and functions for rug calls, votes and tags
-    web/                   page source (style, body, app.js; community.* only in the GitHub build); build_page.py inlines it
+    web/                   page source (style, body, app.js, trade.* for Buy & sell; community.* only in the GitHub build);
+                           build_page.py inlines it
+    tools/fetch_candles.py research only: candles for every token seen, run by .github/workflows/study-candles.yml
+    tools/study/           research only: the candle study behind the first Buy & sell bench (merge.py says how to run it)
+    .github/workflows/     scan.yml (the scan), export-db.yml and study-candles.yml (manual, for offline analysis)
 
 ## Known limits (read before trusting a result)
 
@@ -297,8 +341,9 @@ the page shows when the last scan ran and warns when one is overdue.
   runs. Quiet tokens near the volume floor can be missed.
 * **GeckoTerminal rate limits are per IP**, and shared IPs (CI runners, proxies) hit them sooner. The scanner backs
   off and carries on, so a run just takes longer.
-* **Candles reach back 24 hours** on the free tier. If the scanner is down for more than a day, that day's highs are
-  lost and some outcome multiples are recorded as missed.
+* **Candles reach back about three and a half days** for an active pool on the free tier (1,000 five-minute
+  candles). The tracker still treats a gap of more than a day as lost, which only errs towards recording a missed
+  outcome.
 * **Exit cost** takes the worse of a constant-product pool model and Jupiter's quoted price impact. Quotes for the
   same token move by a point or two minute to minute; the gate's 10% limit sits well clear of that noise.
 * **Bundling is inferred**, from RugCheck's wallet-link graph and near-identical balances in the top holders. It is
@@ -310,5 +355,11 @@ the page shows when the last scan ran and warns when one is overdue.
   alarms, they do not remove them, and four weeks of one market regime is still one regime.
 * **The crowd can be gamed** (sock-puppet accounts, coordinated tags). That is why it never gates, and why calls are
   scored against the base rate rather than counted.
+* **Paper trades are not fills.** The ledger prices a trade once a scan at DEX Screener's price, with a fee allowance
+  and a pool-model price impact. Real fills add slippage on fast moves, priority fees and failed transactions, and a
+  public signal can move a thin pool before you act on it. A live rule's record is evidence about the past, not a
+  promise about its next trade.
+* **Many rules, few weeks.** With 24 rules under test, one will clear the bar by luck now and then. Requiring a
+  forward record, two reviews in a row and a backtest that agrees cuts that down; it does not remove it.
 
 Information only; not investment advice.

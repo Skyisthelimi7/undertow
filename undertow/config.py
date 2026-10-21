@@ -98,8 +98,8 @@ MIN_VOL1H = 2_000                 # still trading: USD volume in the last hour
 MIN_TRADERS_1H = 30               # enough traders: distinct wallets trading in the last hour
 OVEREXTENDED = 0.5                # price this far above its 6h average reads as overextended
 
-# Entry tracker. GeckoTerminal's free candles only reach back 24 hours, so tracked tokens are polled at least
-# hourly; a gap longer than a day loses that day's highs.
+# Entry tracker. GeckoTerminal's free 5-minute candles reach back about three and a half days for an active pool
+# (1,000 candles); tracked tokens are polled at least hourly, and the tracker treats a gap of over a day as lost.
 TRACK_DAYS = 14                   # keep updating ATH and outcomes this long after first entry
 TRACK_REFRESH_H_OUT = 1           # tokens no longer in the screener: candles hourly (in-screener tokens every run)
 CANDLE_BUDGET = 40                # GeckoTerminal candle calls per run
@@ -240,3 +240,124 @@ TSNAP_FULL_H = 72                 # hourly for the first 3 days after entry, the
 SNAP_BUCKETS = 8                  # the page loads a token's hourly snapshots from one of this many files
 SNAP_KEEP_H = 36                  # per-run snapshots only feed 24-30h lookbacks (sparkline, holder growth, outflow)
 TG_KEEP_DAYS = 8                  # Telegram member counts, for growth rates
+
+# ---- Buy and sell signals (added 21 Oct 2026; undertow/trade.py says how a rule earns a live signal) ------------------
+# Paper trades only. Every rule on the bench records what following it would have returned after costs on a usd-sized
+# position, priced once a scan; the live ledger is the record of the rules that earned it. fee_pct is a per-side
+# allowance for pool, protocol and creator fees (they vary by venue, and on pump.fun's pools with market cap); price
+# impact comes on top, from the pool's liquidity. A rule goes live only on its forward record (trades opened after it
+# joined the bench): min_trades settled trades averaging at least min_edge % after costs with t >= z, in promote_after
+# reviews in a row.
+# A rule trades a coin at most once every reentry_h hours (and never while its last trade there is open), so one
+# coin's readings cannot fill a rule's record. Coins are followed for follow_h hours after they leave the screener;
+# the path is kept path_days, and paper trades keep_days (the live rules' trades for good).
+TRADE = {"usd": 500, "fee_pct": 1.0, "reentry_h": 24, "follow_h": 48, "max_miss": 3, "liq_pull": 0.5,
+         "path_days": 14, "window_days": 28, "keep_days": 60, "every_days": 7, "min_trades": 30, "min_edge": 1.0, "z": 2.0,
+         "promote_after": 2, "retire_after": 2, "max_promotions": 1, "max_live": 2, "testing": 24, "add_per_review": 4,
+         "stale_after": 6, "retest_after_days": 56, "switch_min_gain": 1.0, "switch_after": 2,
+         "var_min_n": 300, "var_min_rho": 0.05, "var_retire_after": 3, "warn_gap": 2.0}
+
+
+def _rule(rid, label, *conds):
+    return {"id": rid, "label": label, "all": [list(c) for c in conds], "source": "pool"}
+
+
+# Entry rules waiting to be tested, in order. Each condition is (variable, operator, threshold) on trade.VARIABLES; all
+# must hold, on a coin that passes every gate. Price changes and the path variables are in %, dd24s is a fraction.
+# The first ones are what lost least in the candle study (TRADE_STUDY): coins that had not just been pushed, with deep
+# pools and low turnover. The rest test common ideas (breakouts, dips, flows, holders) the study could not settle or
+# found losing, so the forward record can confirm or overturn it.
+ENTRY_POOL = [
+    _rule("unpushed_liquid", "Not pushed (under 15% off its 6h low), liquidity at least $100k", ("ru6", "<", 15), ("liq", ">=", 100_000)),
+    _rule("unpushed_flat_busy", "Not pushed, flat over the hour (within 5%), volume at or above its usual pace",
+          ("ru6", "<", 15), ("c1h", ">=", -5), ("c1h", "<=", 5), ("v1h_24", ">=", 1)),
+    _rule("liquid_low_turnover", "Liquidity at least $100k, 24h volume at most half its market cap, not pushed",
+          ("liq", ">=", 100_000), ("turn", "<=", 0.5), ("ru6", "<", 20)),
+    _rule("old_liquid_calm", "A week old or more, liquidity at least $100k, swings under 3% a scan",
+          ("age", ">=", 168), ("liq", ">=", 100_000), ("vola", "<", 3)),
+    _rule("bigcap_unpushed", "Market cap $1m+, not pushed", ("mc", ">=", 1_000_000), ("ru6", "<", 15)),
+    _rule("calm_liquid", "Calm and liquid: swings under 2.5% a scan, liquidity at least $100k", ("vola", "<", 2.5), ("liq", ">=", 100_000)),
+    _rule("buyers_unpushed", "Buyers in charge: net buying, most traders net buyers, more buys than sells, not pushed, liquidity $50k+",
+          ("nf1h", ">", 0), ("brd1h", ">=", 0.5), ("bs1h", ">=", 1), ("ru6", "<", 20), ("liq", ">=", 50_000)),
+    _rule("holders_growing", "Holders rising, price up 0-10% in the hour, not pushed", ("hc1h", ">", 0), ("c1h", ">=", 0), ("c1h", "<=", 10), ("ru6", "<", 25)),
+    _rule("organic_quiet", "Organic score 70+, not pushed, flat or up over the hour", ("org", ">=", 70), ("ru6", "<", 20), ("c1h", ">=", 0)),
+    _rule("net_buy_deep", "Net buying at least 2% of liquidity in the hour, not pushed", ("nf1h_liq", ">=", 0.02), ("ru6", "<", 25)),
+    _rule("unpushed_wild", "Not pushed but swinging hard (4%+ a scan): lottery tickets", ("ru6", "<", 15), ("vola", ">=", 4)),
+    _rule("old_breadth", "A week old or more, 55%+ of traders net buyers, up over the hour", ("age", ">=", 168), ("brd1h", ">=", 0.55), ("c1h", ">", 0)),
+    _rule("market_up_calm", "Market rising (half of candidates up over the hour), coin calm and not pushed",
+          ("mkt1h", ">=", 0.5), ("vola", "<", 3), ("ru6", "<", 20)),
+    _rule("flow6_old", "Net buying over 6h, two days old or more, not pushed", ("nf6h", ">", 0), ("age", ">=", 48), ("ru6", "<", 25)),
+    _rule("quiet_since_high", "Its 24h high was 6h+ ago, now within 10% of its 6h high, swings under 2%",
+          ("hi_h", ">=", 6), ("dd6", ">=", -10), ("vola", "<", 2)),
+    _rule("tight_near_high", "Within 5% of its 6h high, swings under 2%", ("dd6", ">=", -5), ("vola", "<", 2)),
+    _rule("few_flags_flat", "At most 1 rug-study flag, not pushed, flat or up over the hour", ("rf", "<=", 1), ("ru6", "<", 20), ("c1h", ">=", 0)),
+    _rule("volume_before_price", "Volume at 2x its usual pace, price up 0-15% in the hour", ("v1h_24", ">=", 2), ("c1h", ">=", 0), ("c1h", "<=", 15)),
+    _rule("steady_climb", "Steady climber: up over 24h and 6h, within 10% of its 6h high, swings under 4%",
+          ("c24h", ">", 0), ("c6h", ">", 0), ("dd6", ">=", -10), ("vola", "<", 4)),
+    _rule("dip_uptrend", "Dip in an uptrend: up 20%+ over 24h, 15-35% below its 6h high",
+          ("c24h", ">=", 20), ("dd6", "<=", -15), ("dd6", ">=", -35)),
+    _rule("early_breakout", "Early breakout: up 10-40% in the hour on 1.5x usual volume, under 60% off its 6h low",
+          ("c1h", ">=", 10), ("c1h", "<=", 40), ("v1h_24", ">=", 1.5), ("ru6", "<", 60)),
+    _rule("bounce", "Bounce: down 30%+ over 24h, up 5%+ in the hour, under 40% off its 6h low",
+          ("c24h", "<=", -30), ("c1h", ">=", 5), ("ru6", "<", 40)),
+    _rule("deep_pool_calm", "Liquidity at least 15% of market cap, swings under 3%", ("liq_pct", ">=", 0.15), ("vola", "<", 3)),
+    _rule("momentum_unpushed", "Momentum score 70+, under 30% off its 6h low", ("mom", ">=", 70), ("ru6", "<", 30)),
+    # queued for later reviews
+    _rule("unpushed_liquid_old", "Not pushed, liquidity $100k+, three days old or more", ("ru6", "<", 15), ("liq", ">=", 100_000), ("age", ">=", 72)),
+    _rule("unpushed_buying", "Not pushed, net buying over the hour, liquidity $50k+", ("ru6", "<", 15), ("nf1h", ">", 0), ("liq", ">=", 50_000)),
+    _rule("low_turnover_up", "24h volume at most 1x market cap, swings under 3%, up over 6h", ("turn", "<=", 1), ("vola", "<", 3), ("c6h", ">", 0)),
+    _rule("organic_bigcap", "Organic score 80+, market cap $500k+", ("org", ">=", 80), ("mc", ">=", 500_000)),
+    _rule("ticking_up_calm", "Up since the last scan and over 3h, swings under 3%, not pushed",
+          ("r15", ">", 0), ("r3h", ">=", 0), ("vola", "<", 3), ("ru6", "<", 20)),
+    _rule("not_pushed_high", "Not pushed (under 15% off its 6h low) and within 25% of its 24h high", ("ru6", "<", 15), ("dd24s", ">=", -0.25)),
+    _rule("holders_liquid", "Holders rising over 24h, liquidity $100k+, not pushed", ("hc24h", ">", 0), ("liq", ">=", 100_000), ("ru6", "<", 20)),
+    _rule("market_up_liquid", "Market rising, liquidity $100k+, not pushed", ("mkt1h", ">=", 0.5), ("liq", ">=", 100_000), ("ru6", "<", 15)),
+]
+# Exit policies on the bench. Every paper trade is priced under each, so they are compared on the same entries.
+# sl: stop (% below entry); tp: target (% above); trail: sell this far below the peak once up `arm`%; cool: after a
+# push of this many %, sell on the first scan that falls cool_drop %; fade: sell after a fall of this many % in an hour;
+# max_h: sell after this many hours whatever happens. In the candle study a +10% target sold within 8h lost least and
+# stops on their own changed little at a 15-minute scan cadence, so most of the bench sells into strength.
+EXIT_POOL = [
+    {"id": "tp10_8h", "tp": 10, "max_h": 8}, {"id": "tp15_8h", "tp": 15, "max_h": 8}, {"id": "tp20_8h", "tp": 20, "max_h": 8},
+    {"id": "tp10_4h", "tp": 10, "max_h": 4}, {"id": "tp10_24h", "tp": 10, "max_h": 24}, {"id": "tp20_24h", "tp": 20, "max_h": 24},
+    {"id": "tp10_sl50_8h", "tp": 10, "sl": 50, "max_h": 8}, {"id": "tp10_sl15_24h", "tp": 10, "sl": 15, "max_h": 24},
+    {"id": "hold4h", "max_h": 4}, {"id": "hold8h", "max_h": 8}, {"id": "hold24h", "max_h": 24},
+    {"id": "tp30_sl25", "tp": 30, "sl": 25, "max_h": 24},
+    {"id": "trail25_arm20", "trail": 25, "arm": 20, "sl": 30, "max_h": 24},
+    {"id": "cool20_d5_8h", "cool": 20, "cool_drop": 5, "sl": 25, "max_h": 8},
+    {"id": "fade20", "fade": 20, "sl": 30, "max_h": 24},
+]
+DEFAULT_EXIT = "tp10_8h"
+# Sell-side warnings: states that were followed by falls. Each review re-measures them on coins passing every gate.
+SELL_WARNINGS = [
+    {"id": "pushed30", "label": "Up 30% or more from its 6h low", "all": [["ru6", ">=", 30]]},
+    {"id": "pushed60", "label": "Up 60% or more from its 6h low", "all": [["ru6", ">=", 60]]},
+    {"id": "hot_hour", "label": "Up 20% or more in the last hour", "all": [["c1h", ">=", 20]]},
+    {"id": "pushed_turning", "label": "Up 30% or more from its 6h low, and down since the last scan",
+     "all": [["ru6", ">=", 30], ["r15", "<", 0]]},
+]
+# What the candle study behind the first bench found, shown on the Buy & sell tab. Replayed on GeckoTerminal's
+# 5-minute candles for every coin the scanner had seen in range, each from the moment the scanner first saw it, priced
+# once every 15 minutes as a scan would, with this file's costs.
+TRADE_STUDY = {
+    "period": "18 Oct 2026 16:45 to 21 Oct 2026 04:30 UTC",
+    "sample": "493 coins in range, 31,309 readings 15 minutes apart, 2,293 sample entries (each coin's first reading in "
+              "each 6-hour block)",
+    "findings": [
+        "Pushes cooled off. Coins up 30-60% from their 6-hour low fell 8.2% on average over the next 4 hours (median "
+        "-9.0%, 68% no higher); up 60-100%, they fell 12.1% (74% no higher). Coins within 10% of their 6-hour low were flat "
+        "(+0.4%, half higher). Coins that had tripled or more were lottery tickets: most fell (median -19.8%), a few "
+        "kept running.",
+        "No buy rule cleared costs. Nine entry rules, each tried with 15 exits, and 22 entry filters with a +20% "
+        "target all lost money on average at $500 a trade. The least bad (coins not pushed, with $100k+ of "
+        "liquidity or flat on busy volume) lost about 1.7-1.8% a trade with a +20% target sold within 8 hours.",
+        "Costs decide most of it: at $500 a side cost a median 2.2% (a 1% allowance for fees plus price impact), so a round trip "
+        "needs about +4.5% just to break even; at $100 it is about 2.5%.",
+        "Selling into strength beat holding: a +10% target sold within 8 hours lost 5.4% a trade on the sample entries "
+        "against 8.9% for holding 8 hours. Stops did little on their own (-8.7% with a 15% stop) and selling 15% "
+        "below the peak (-7.2%) still trailed the target: at one price every 15 minutes, a stop fills after the drop.",
+        "One market: the coins in range fell 13% on average over 24 hours in this window. Rules that lost here could "
+        "work in a rising market, which is why the bench keeps testing them forward.",
+    ],
+}

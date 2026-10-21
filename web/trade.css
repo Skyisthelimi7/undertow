@@ -1,0 +1,35 @@
+/* ---------- Buy & sell tab ---------- */
+.tradewrap .grid.lab td.l:first-child{min-width:110px;max-width:260px}
+.tradewrap .tkbtn{font-weight:600;text-decoration:none;font-family:var(--font-mono,ui-monospace,monospace);font-size:12.5px}
+.tradewrap .tkbtn:hover{text-decoration:underline}
+.tradewrap .rl{display:inline-block;max-width:360px;white-space:normal}
+.tradewrap .nm{color:var(--muted);font-size:11.5px}
+.tr-up{color:var(--ok)}
+.tr-dn{color:var(--danger)}
+.tr-sell{color:var(--danger)}
+.tr-buy{color:var(--ok)}
+.tr-hold{color:var(--fg-2)}
+.tr-warn{color:var(--warn)}
+#xr-trade p{margin:0;font-size:13px;line-height:1.45}
+#xr-trade p+p{margin-top:6px}
+.fifths rect.pos{fill:var(--ok)}
+.fifths rect.neg{fill:var(--danger)}
+.fifths line.base{stroke:var(--line-strong);stroke-width:1}
+.tr-study p{margin:0 0 6px;font-size:13px;line-height:1.5;max-width:72ch}
+.tr-study table{margin-top:4px}
+.tradewrap .lead{display:grid;gap:4px;margin-top:6px}
+.tradewrap .lead p{margin:0;font-size:13px}
+.tradewrap td.sellcell{min-width:150px;max-width:280px;white-space:normal}
+@media (max-width:640px){
+  .tradewrap table.cards{min-width:0}
+  .tradewrap table.cards thead{display:none}
+  .tradewrap table.cards tr{display:block;padding:8px 0;border-bottom:1px solid var(--line)}
+  .tradewrap table.cards td{display:flex;justify-content:space-between;align-items:baseline;gap:14px;padding:2px 2px;border:0;text-align:right;min-width:0;max-width:none;white-space:normal}
+  .tradewrap table.cards td::before{content:attr(data-label);flex:none;color:var(--muted);font-size:11.5px;text-align:left}
+  .tradewrap table.cards td:first-child{font-size:14px}
+  .tradewrap table.cards td:first-child::before{content:none}
+  .tradewrap table.cards td.l{justify-content:space-between}
+  .tradewrap table.cards td.sellcell{min-width:0}
+  .tradewrap .rl{max-width:none}
+  .tradewrap table.cards .cv{text-align:right;min-width:0}
+}
