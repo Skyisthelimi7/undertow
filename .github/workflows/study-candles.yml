@@ -1,0 +1,31 @@
+name: study-candles
+# Manual only: fetches 5-minute GeckoTerminal candles for every token the scanner has seen in range, split across six
+# runners (GeckoTerminal rate-limits each address), for offline research into entry and exit signals. It reads the
+# saved history from the cache and writes nothing back, so it never disturbs a running scan.
+on: workflow_dispatch
+permissions:
+  contents: read
+  actions: read
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - uses: actions/cache/restore@v4
+        with:
+          path: state/undertow.db
+          key: undertow-db-never-matches
+          restore-keys: undertow-db-
+      - run: python3 tools/fetch_candles.py state/undertow.db out ${{ matrix.shard }} 6
+      - uses: actions/upload-artifact@v4
+        with:
+          name: candles-${{ matrix.shard }}
+          path: out
+          retention-days: 3
