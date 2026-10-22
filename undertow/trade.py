@@ -120,19 +120,32 @@ def unmet(rule, f):
 
 
 # ---------------------------------------------------------------- costs and exits
-def cost_pct(liq, usd, fee):
-    """One side's cost in %: the pool and creator fees plus the price impact of `usd` in a constant-product pool
-    holding `liq` in total (half each side)."""
+def cost_pct(liq, usd, fee, tx_usd=0.0):
+    """One side's cost in %: the pool and creator fees, the network fee (tx_usd dollars a transaction, which weighs
+    more on a small position), and the price impact of `usd` in a constant-product pool holding `liq` in total (half
+    each side)."""
     if not liq or liq <= 0:
         return 100.0
-    return min(100.0, usd / (liq / 2 + usd) * 100 + fee)
+    return min(100.0, usd / (liq / 2 + usd) * 100 + fee + tx_usd / usd * 100)
 
 
-def net_ret(x, liq_in, liq_out, cfg):
-    """Net return in % for a price multiple x, after paying costs to get in and to get out."""
-    c0 = cost_pct(liq_in, cfg["usd"], cfg["fee_pct"]) / 100
-    c1 = cost_pct(liq_out, cfg["usd"], cfg["fee_pct"]) / 100
+def net_ret(x, liq_in, liq_out, cfg, usd=None):
+    """Net return in % for a price multiple x, after paying costs to get in and to get out, on a position of usd
+    dollars (the ledger's size when not given)."""
+    usd = usd or cfg["usd"]
+    c0 = cost_pct(liq_in, usd, cfg["fee_pct"], cfg.get("tx_usd", 0.0)) / 100
+    c1 = cost_pct(liq_out, usd, cfg["fee_pct"], cfg.get("tx_usd", 0.0)) / 100
     return (x * (1 - c0) * (1 - c1) - 1) * 100
+
+
+def net_of(sig, o, cfg, usd=None):
+    """A recorded result [net, hours, reason, ts, price, exit liquidity] priced again, at another position size or
+    other costs: from the entry and exit prices and the pool's liquidity at each end (the entry's when the exit's was
+    not recorded). None when the record has no price."""
+    if not o or len(o) < 5 or not o[4] or not sig.get("in_price"):
+        return None
+    liq_out = o[5] if len(o) > 5 and o[5] else sig.get("in_liq")
+    return net_ret(o[4] / sig["in_price"], sig.get("in_liq"), liq_out, cfg, usd)
 
 
 def exit_label(p):
@@ -227,7 +240,7 @@ def start_states(price, policies):
 
 def advance(sig, obs, now, policies, cfg, tick=False):
     """Step one paper trade through each exit policy still undecided for it, with this scan's reading of its coin.
-    sig: in_ts, in_price, in_liq, out {policy: [net, hours, reason, ts, price]}, st {policy: {peak, prev}} (one entry
+    sig: in_ts, in_price, in_liq, out {policy: [net, hours, reason, ts, price, liquidity]}, st {policy: {peak, prev}} (one entry
     per undecided policy), miss, last_price, last_liq. obs: {price, liq, c1h, hard, xm} or None when nothing prices
     the coin this scan; xm: {policy: True} where an exit model says sell this trade now. A policy no longer on the
     bench is dropped. tick: obs is a minute reading between scans (see step). Returns (out, st, miss, last_price,
@@ -252,7 +265,7 @@ def advance(sig, obs, now, policies, cfg, tick=False):
             continue
         r = step(pol, pos, st[pid], price, liq, c1h, now, cfg, guard, bool(xm.get(pid)), tick)
         if r:
-            out[pid] = [LAB._r(r[0]), round(r[1], 3), r[2], now, LAB._r(r[3])]
+            out[pid] = [LAB._r(r[0]), round(r[1], 3), r[2], now, LAB._r(r[3]), LAB._r(liq) if liq else None]
             st.pop(pid)
     return out, st, miss, lp, ll, not st
 

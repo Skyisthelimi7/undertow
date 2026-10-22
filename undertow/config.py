@@ -245,16 +245,20 @@ TG_KEEP_DAYS = 8                  # Telegram member counts, for growth rates
 
 # ---- Buy and sell signals (added 21 Oct 2026; undertow/trade.py says how a rule earns a live signal) ------------------
 # Paper trades only. Every rule on the bench records what following it would have returned after costs on a usd-sized
-# position, priced once a scan; the live ledger is the record of the rules that earned it. fee_pct is a per-side
-# allowance for pool, protocol and creator fees (they vary by venue, and on pump.fun's pools with market cap); price
-# impact comes on top, from the pool's liquidity. A rule goes live only on its forward record (trades opened after it
-# joined the bench): min_trades settled trades averaging at least min_edge % after costs with t >= z, in promote_after
-# reviews in a row.
+# position; the live ledger is the record of the rules that earned it. fee_pct is a per-side allowance for pool,
+# protocol and creator fees: PumpSwap charges 0.25% plus a creator fee that falls with market cap (0.95% under $300k,
+# 0.05% above $20M), other venues 0.25% to 1%; a trading bot adds about 1% a side on top, which this leaves out.
+# tx_usd is the network fee a transaction (base fee plus a modest priority fee). Price impact comes on top, from the
+# pool's liquidity, so it is the one cost a smaller position shrinks. The ledger is kept at $100 a trade (it was $500
+# until 22 Oct 2026; every recorded result was priced again at $100 then, scan.reprice_ledger), and the Buy & sell tab
+# shows the same entries at each of sizes. A rule goes live only on its forward record (trades opened after it joined
+# the bench): min_trades settled trades averaging at least min_edge % after costs with t >= z, in promote_after reviews
+# in a row.
 # A rule trades a coin at most once every reentry_h hours (and never while its last trade there is open), so one
 # coin's readings cannot fill a rule's record. Coins are followed for follow_h hours after they leave the screener;
 # the path is kept path_days, and paper trades keep_days (the live rules' trades for good).
-TRADE = {"usd": 500, "fee_pct": 1.0, "reentry_h": 24, "follow_h": 48, "max_miss": 3, "liq_pull": 0.5,
-         "path_days": 14, "window_days": 28, "keep_days": 60, "every_days": 7, "min_trades": 30, "min_edge": 1.0, "z": 2.0,
+TRADE = {"usd": 100, "fee_pct": 1.0, "tx_usd": 0.05, "sizes": (25, 100, 500), "reentry_h": 24, "follow_h": 48,
+         "max_miss": 3, "liq_pull": 0.5, "path_days": 14, "window_days": 28, "keep_days": 60, "every_days": 7, "min_trades": 30, "min_edge": 1.0, "z": 2.0,
          "promote_after": 2, "retire_after": 2, "max_promotions": 1, "max_live": 2, "testing": 40, "add_per_review": 4,
          "stale_after": 6, "retest_after_days": 56, "switch_min_gain": 1.0, "switch_after": 2,
          "var_min_n": 300, "var_min_rho": 0.05, "var_retire_after": 3, "warn_gap": 2.0}
@@ -428,6 +432,19 @@ ATTENTION_RULES = [
           ("cto", ">=", 1), ("liq", ">=", 50_000), ("ru6", "<", 15)),
 ]
 
+# Rules on mid-sized pools (added 22 Oct 2026). Repriced at $100, the bench's entries on pools of $20k to $100k made
+# +4.2% a trade before costs over 21-22 Oct (380 entries) and about +1% after costs, while deep pools lost before costs
+# and $500 positions lost everywhere. These test that forward: the band on its own (a baseline), the band when the
+# coin is not pushed, and the band when it has not just run up from its 30-minute low (the minute data's clearest
+# pattern: short runs fall back). They join the bench at once, so their records start with them.
+SIZE_RULES = [
+    _rule("mid_pool", "Pool of $20k to $100k (the band's baseline)", ("liq", ">=", 20_000), ("liq", "<", 100_000)),
+    _rule("mid_pool_unpushed", "Pool of $20k to $100k, not pushed (under 15% off its 6h low)",
+          ("liq", ">=", 20_000), ("liq", "<", 100_000), ("ru6", "<", 15)),
+    _rule("mid_pool_no_run", "Pool of $20k to $100k, not just run up (under 5% off its 30-min low)",
+          ("liq", ">=", 20_000), ("liq", "<", 100_000), ("up30", "<", 5)),
+]
+
 # ---- Correlations (added 21 Oct 2026; undertow/corr.py) ---------------------------------------------------------
 # Worked out once an hour from the Buy & sell path (every scan's reading of every coin passing every gate), one
 # reading per coin per hour, so a coin's minute-by-minute readings do not count as independent evidence.
@@ -534,7 +551,7 @@ ML_STUDY = {
 # quick rule buys a coin again only once its last trade on it has closed and reentry_min minutes have passed since it
 # bought. Quick rules trade only pools holding min_liq dollars or more: at $500 a side, a round trip costs about 4.6%
 # at $75k (fees plus price impact), so a +5% target barely breaks even there and loses below it (at $20k a +10% target
-# still loses 2%). Quick exits are compared on quick trades against baseline_exit. Minute readings are kept keep_h
+# still loses 2%). The floor was set when the ledger was kept at $500; at $100 the same round trip costs about 2.6%. Quick exits are compared on quick trades against baseline_exit. Minute readings are kept keep_h
 # hours, feed entries feed_keep_days days. A scan rule's buy fills at the scan's decision time at the coin's latest
 # minute price, if that price is no more than fill_lag_s seconds old (else at the scan's own reading).
 FAST = {"every_s": 60, "slow_every": 2, "max_coins": 240, "watch_recent_h": 2, "keep_h": 24, "feed_keep_days": 7,

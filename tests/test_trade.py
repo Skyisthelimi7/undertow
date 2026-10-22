@@ -379,5 +379,57 @@ class Ledger(unittest.TestCase):
         self.assertEqual(SC.seed_tpath(st, t0 + 21 * 900), 0)               # only once
 
 
+class Sizes(unittest.TestCase):
+    """The ledger's position size: costs by size, pricing recorded results again, and the page's size table."""
+
+    def test_costs_by_size(self):
+        cfg = {"usd": 100, "fee_pct": 1.0, "tx_usd": 0.05}
+        self.assertAlmostEqual(T.cost_pct(50_000, 100, 1.0, 0.05), 100 / 25_100 * 100 + 1.0 + 0.05)
+        # impact shrinks with the position; the fee does not; the network fee weighs more on a small one
+        self.assertLess(T.cost_pct(50_000, 100, 1.0, 0.05), T.cost_pct(50_000, 500, 1.0, 0.05))
+        self.assertGreater(T.cost_pct(1e12, 10, 1.0, 0.05), T.cost_pct(1e12, 100, 1.0, 0.05))
+        sig = {"in_price": 1.0, "in_liq": 50_000}
+        o = [0.0, 1.0, "target", 0.0, 1.1, 40_000]
+        self.assertAlmostEqual(T.net_of(sig, o, cfg), T.net_ret(1.1, 50_000, 40_000, cfg))
+        self.assertAlmostEqual(T.net_of(sig, o[:5], cfg, 500), T.net_ret(1.1, 50_000, 50_000, cfg, 500))  # no exit liquidity kept
+        self.assertIsNone(T.net_of(sig, [0.0, 1.0, "time", 0.0], cfg))
+
+    def test_recorded_results_are_priced_again_once_when_the_costs_change(self):
+        st = Store(os.path.join(tempfile.mkdtemp(), "t.db"))
+        old = {**C.TRADE, "usd": 500, "tx_usd": 0.0}
+        sid = st.add_sig("r", "A", "A", 0.0, 1.0, 30_000, 1e6, {}, "tp10_8h", False, {})
+        o = [T.net_ret(1.2, 30_000, 30_000, old), 2.0, "target", 7200.0, 1.2]
+        st.update_sig(sid, {"tp10_8h": o}, {}, 0, 1.2, 30_000, True, 7200.0)
+        st.commit()
+        self.assertEqual(SC.reprice_ledger(st, C.TRADE), 1)
+        got = st.sigs()[0]["out"]["tp10_8h"]
+        self.assertAlmostEqual(got[0], T.net_ret(1.2, 30_000, 30_000, C.TRADE), places=2)
+        self.assertGreater(got[0], o[0])                                    # $100 costs less than $500 on a thin pool
+        self.assertEqual(got[1:], o[1:])
+        self.assertEqual(SC.reprice_ledger(st, C.TRADE), 0)                 # once per change of costs
+        st.close()
+
+    def test_the_size_table_prices_the_same_trades_at_each_size(self):
+        live = {"id": "tp10_8h", "tp": 10, "max_h": 8}
+        rules = {"r": {"id": "r"}, "fast_breakout": {"id": "fast_breakout", "fast": True, "exit": "q5_sl5_1h"}}
+        exits = {"tp10_8h": live, "q5_sl5_1h": {"id": "q5_sl5_1h", "tp": 5, "sl": 5, "max_h": 1}}
+        sigs, now = [], 100 * H
+        for i in range(12):
+            liq = 15_000 if i % 2 else 150_000
+            sigs.append({"rule": "r", "mint": f"M{i}", "in_ts": 10 * H, "in_price": 1.0, "in_liq": liq,
+                         "out": {"tp10_8h": [0.0, 2.0, "target", 12 * H, 1.1, liq]}})
+            sigs.append({"rule": "r2", "mint": f"M{i}", "in_ts": 10 * H, "in_price": 1.0, "in_liq": liq,   # shared entry
+                         "out": {"tp10_8h": [0.0, 2.0, "target", 12 * H, 1.1, liq]}})
+        z = SC.size_page(sigs, rules, exits, live, C.TRADE, now)
+        scan = next(g for g in z["groups"] if g["id"] == "scan")
+        self.assertEqual(scan["n"], 12)                                     # an entry two rules share counts once
+        self.assertAlmostEqual(scan["gross"], 10.0, places=3)
+        self.assertGreater(scan["net"]["25"], scan["net"]["500"])
+        thin = next(b for b in scan["buckets"] if b["label"] == "under $20k")
+        deep = next(b for b in scan["buckets"] if b["label"] == "$100k or more")
+        self.assertGreater(deep["net"]["500"], thin["net"]["500"])          # impact: what a deep pool spares
+        self.assertEqual(next(g for g in z["groups"] if g["id"] == "random")["n"], 0)
+
+
 if __name__ == "__main__":
     unittest.main()

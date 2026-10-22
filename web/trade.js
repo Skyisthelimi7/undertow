@@ -23,8 +23,8 @@ function stChip(s){var m=STAT[s]||['out',s];return '<span class="pill '+m[0]+'">
 var VERD={earns:['works','Earns'],loses:['hurts','Loses'],unclear:['none','Unclear'],collecting:['coll','Collecting'],
   signal:['works','Signal'],'no signal':['none','No signal'],holds:['works','Holds'],'does not hold':['none','Does not hold']};
 function vchip(v){var m=VERD[v]||VERD.collecting;return '<span class="vchip '+m[0]+'">'+m[1]+'</span>';}
-function cost(liq,size){var c=T.cfg||{};if(!liq||liq<=0)return 100;return Math.min(100,size/(liq/2+size)*100+(c.fee_pct!=null?c.fee_pct:1));}
-function netAt(x,liqIn,liqOut){var c=T.cfg||{},s=c.usd||500;return (x*(1-cost(liqIn,s)/100)*(1-cost(liqOut,s)/100)-1)*100;}
+function cost(liq,size){var c=T.cfg||{};if(!liq||liq<=0)return 100;return Math.min(100,size/(liq/2+size)*100+(c.fee_pct!=null?c.fee_pct:1)+(c.tx_usd||0)/size*100);}
+function netAt(x,liqIn,liqOut){var c=T.cfg||{},s=c.usd||100;return (x*(1-cost(liqIn,s)/100)*(1-cost(liqOut,s)/100)-1)*100;}
 function rec(s){return !s||!s.n?'–':int(s.n)+' · '+pc(s.win*100,0)+' won · avg '+n1(s.mean)+tval(s.t);}
 function sec(title,body,id){return '<section class="lab-sec"'+(id?' id="'+id+'"':'')+'><h3>'+title+'</h3>'+body+'</section>';}
 function table(head,rows,cls){return '<div class="tscroll"><table class="grid lab'+(cls?' '+cls:'')+'"><thead><tr>'+head.map(function(h,i){return '<th'+(i===0||h.charAt(0)==='<'?' class="l"':'')+'>'+h.replace(/^</,'')+'</th>';}).join('')+'</tr></thead><tbody>'+rows.join('')+'</tbody></table></div>';}
@@ -64,15 +64,15 @@ function sellState(x){
 function head(){
   var live=(T.bench||[]).filter(function(r){return r.status==='live';}),testing=(T.bench||[]).filter(function(r){return r.status==='testing';});
   var sigLive=(T.signals||[]).filter(function(s){return s.live;}).length,sigTest=(T.signals||[]).length-sigLive,R=T.record||{},c=T.cfg||{};
-  var pnl=R.n?R.mean*R.n*(c.usd||500)/100:null;
+  var pnl=R.n?R.mean*R.n*(c.usd||100)/100:null;
   return '<div class="trk-head"><div class="kpis">'
     +kpi('Live buy rules',live.length?int(live.length):'None yet',live.length?esc(clip(live[0].label,70))+(live.length>1?' and '+(live.length-1)+' more':''):int(testing.length)+' rules under test')
     +kpi('Buy signals now',int(sigLive),sigTest?int(sigTest)+' coins match a rule under test':'nothing matches a rule under test')
     +kpi('Open paper trades',int((T.open||[]).length),'live rules only')
-    +kpi('Record',R.n?pc(R.win*100,0)+' won':'No trades yet',R.n?int(R.n)+' trades, average '+n1(R.mean)+(pnl!=null?'; '+(pnl<0?MINUS:'+')+usd(Math.abs(pnl))+' in all at '+usd(c.usd||500)+' a trade':''):'closed live trades appear here')
+    +kpi('Record',R.n?pc(R.win*100,0)+' won':'No trades yet',R.n?int(R.n)+' trades, average '+n1(R.mean)+(pnl!=null?'; '+(pnl<0?MINUS:'+')+usd(Math.abs(pnl))+' in all at '+usd(c.usd||100)+' a trade':''):'closed live trades appear here')
     +kpi('Exit',esc(T.exit&&T.exit.id||'n/a'),esc((T.exit&&T.exit.label)||''))
     +kpi('Next review',esc(ymd(T.next_review)),'last '+esc(ymd(T.last_review)))
-    +'</div><p class="trk-note">Paper trades, not advice. Every rule on the bench records what following it would have returned on a <b>'+usd(c.usd||500)+'</b> position after a '+pc(c.fee_pct,1)+' fee allowance a side plus price impact: bought once a scan’s gates are known, at the latest minute price, and priced at every scan and once a minute while a scan runs. A rule earns a live buy signal only on trades it made after joining the bench: at least '+int(c.min_trades)+' that have had time to close, averaging '+n1(c.min_edge)+' or better after costs with t ≥ '+c.z+', in '+c.promote_after+' weekly reviews in a row. Until then its matches show as “under test”.</p></div>';
+    +'</div><p class="trk-note">Paper trades, not advice. Every rule on the bench records what following it would have returned on a <b>'+usd(c.usd||100)+'</b> position after a '+pc(c.fee_pct,1)+' fee allowance a side, '+usd(c.tx_usd||0.05)+' network fee a transaction and price impact: bought once a scan’s gates are known, at the latest minute price, and priced at every scan and once a minute while a scan runs. A rule earns a live buy signal only on trades it made after joining the bench: at least '+int(c.min_trades)+' that have had time to close, averaging '+n1(c.min_edge)+' or better after costs with t ≥ '+c.z+', in '+c.promote_after+' weekly reviews in a row. Until then its matches show as “under test”.</p></div>';
 }
 function kpi(k,v,s){return '<div class="kpi"><div class="k">'+k+'</div><div class="v">'+v+'</div><div class="s">'+s+'</div></div>';}
 
@@ -82,7 +82,7 @@ function leaders(n){
   return (T.bench||[]).filter(function(r){return r.status==='testing'&&!r.model&&!r.fast&&score(r)!=null;}).sort(function(a,b){return score(b)-score(a);}).slice(0,n);
 }
 function buySec(){
-  var c=T.cfg||{},size=U.posSize()||500,e=(T.exit||{}).params||{};
+  var c=T.cfg||{},size=U.posSize()||100,e=(T.exit||{}).params||{};
   var sigs=T.signals||[],live=sigs.filter(function(s){return s.live;});
   /* the exit plan from the price you would pay now: the live policy's target, stop and time limit */
   var plan=function(p){var o=[];if(e.tp!=null)o.push('target '+price(p*(1+e.tp/100))+' (+'+e.tp+'%)');if(e.sl!=null)o.push('stop '+price(p*(1-e.sl/100)));o.push('sell within '+(e.max_h||24)+'h');return o.join(', ');};
@@ -100,7 +100,7 @@ function buySec(){
   var near=(T.near||[]).slice(0,12);
   if(near.length)body+='<details class="rv-gone"><summary>One condition short of '+((T.live_rules||[]).length?'a live rule':'a leading rule')+' ('+(T.near||[]).length+')</summary><ul class="rv-log">'+near.map(function(n){var r=RU[n.rule]||{},m=n.miss[0];
     return '<li><b>'+coinCell(n.mint,(((D.tokens||[]).filter(function(k){return k.mint===n.mint;})[0])||{}).symbol)+'</b> for “'+esc(r.label||n.rule)+'”: needs '+cond(m)+', has '+esc(m[3]==null?'no value':fmtVar(m[0],m[3]))+'</li>';}).join('')+'</ul></details>';
-  body+='<p class="fine">Round trip: the fees and the price impact of buying and later selling your '+usd(size)+' at today’s liquidity (change the size in the bar above). The record itself is kept at '+usd(c.usd||500)+'.</p>';
+  body+='<p class="fine">Round trip: the fees and the price impact of buying and later selling your '+usd(size)+' at today’s liquidity (change the size in the bar above). The record itself is kept at '+usd(c.usd||100)+'.</p>';
   return sec('Buy signals now',body,'tr-buy');
 }
 
@@ -156,7 +156,7 @@ function benchSec(){
 function quickSec(){
   var Q=T.quick;if(!Q)return '';
   var M=Q.minute||{},K=Q.ticks||{},F=Q.cfg||{},c=T.cfg||{},body='';
-  body+='<p class="trk-note">While each scan works out its gates (10 to 15 minutes), the scanner reads DEX Screener once a minute for every coin inside the screener, close to passing, recently passing or held in a paper trade: price, liquidity, 5-minute volume, 5-minute buys and sells, boosts, plus GeckoTerminal’s 5-minute trending list and DEX Screener’s new boosts and ads every 2 minutes. Every open paper trade, from every rule, is stepped on those minutes, so a stop or a target fills within a minute of being reached instead of at the next scan. The quick rules below look at every minute and may buy a coin that passed every gate at the previous scan and whose pool holds at least '+usd(F.min_liq||75000)+' (on thinner pools a '+usd(c.usd||500)+' round trip costs more than a quick target makes); each is judged on its own exit (15 minutes to 2 hours), on the same bar as every rule: at least '+int(c.min_trades)+' trades that have had time to close, averaging '+n1(c.min_edge)+' or better after costs with t ≥ '+c.z+', in '+c.promote_after+' weekly reviews in a row. The random control buys a random 0.5% of minutes on the same coins: what a quick rule has to beat.</p>';
+  body+='<p class="trk-note">While each scan works out its gates (10 to 15 minutes), the scanner reads DEX Screener once a minute for every coin inside the screener, close to passing, recently passing or held in a paper trade: price, liquidity, 5-minute volume, 5-minute buys and sells, boosts, plus GeckoTerminal’s 5-minute trending list and DEX Screener’s new boosts and ads every 2 minutes. Every open paper trade, from every rule, is stepped on those minutes, so a stop or a target fills within a minute of being reached instead of at the next scan. The quick rules below look at every minute and may buy a coin that passed every gate at the previous scan and whose pool holds at least '+usd(F.min_liq||75000)+' (on thinner pools a '+usd(c.usd||100)+' round trip costs more than a quick target makes); each is judged on its own exit (15 minutes to 2 hours), on the same bar as every rule: at least '+int(c.min_trades)+' trades that have had time to close, averaging '+n1(c.min_edge)+' or better after costs with t ≥ '+c.z+', in '+c.promote_after+' weekly reviews in a row. The random control buys a random 0.5% of minutes on the same coins: what a quick rule has to beat.</p>';
   body+='<p class="fine">'+(K.rows?int(K.rows)+' minute readings of '+int(K.coins)+' coins kept (the last '+(F.keep_h||36)+' hours), the latest '+esc(ago(K.last)):'No minute readings yet')+'. '
     +(M.rounds?'This scan: '+int(M.rounds)+' rounds between '+esc(when(M.from))+' and '+esc(when(M.to))+' on '+int(M.coins)+' coins'+(M.errors?' ('+int(M.errors)+' failed)':'')+'; GeckoTerminal’s 5-minute trending list read '+int(M.gt_ok)+' of '+int(M.gt_tries)+' times; '+int(M.closed)+' paper trades closed on the minute data and '+int(M.opened)+' quick trades opened. Quick rules could buy '+int(M.eligible)+' coins.':'')+'</p>';
   var R=(Q.rules||[]).filter(function(r){return r.status!=='retired';}).sort(function(a,b){return (b.status==='live')-(a.status==='live')||(((b.fwd_now||{}).mean||-99)-((a.fwd_now||{}).mean||-99));});
@@ -174,6 +174,20 @@ function quickSec(){
     +table(['Exit policy','Trades','Made money','Average after costs','Against the baseline'],ex.map(function(e){var n=e.now||{};
       return '<tr'+(e.base?' class="holdrow"':'')+'><td class="l">'+esc(e.label)+(e.base?' <span class="nm">baseline</span>':'')+'</td><td>'+(n.n?int(n.n):'–')+'</td><td>'+(n.n?pc(n.win*100,0):'–')+'</td><td>'+(n.n?n1(n.mean):'–')+'</td><td>'+(e.base||!n.n||n.gain==null?'–':n1(n.gain).replace('%',' pts')+tval(n.t))+'</td></tr>';}),'cards');
   return sec('Quick trades on the minute data',body,'tr-quick');
+}
+
+/* bet size: the same closed trades priced at each position size (scan.size_page) */
+function sizeSec(){
+  var Z=T.sizes;if(!Z||!(Z.groups||[]).length)return '';
+  var sz=Z.sizes||[],c=T.cfg||{};
+  var head=['Trades','Before costs','Rose']; sz.forEach(function(u){head.push('After costs at '+usd(u));});
+  var cell=function(v){return '<td class="'+(v>0?'tr-up':'tr-dn')+'">'+n1(v)+'</td>';};
+  var line=function(g,sub){return '<tr'+(sub?' class="subrow"':'')+'><td class="l">'+(sub?'<span class="nm">'+esc(g.label)+'</span>':'<b>'+esc(g.label)+'</b>')+'</td><td>'+int(g.n||0)+'</td>'
+    +(g.gross==null?'<td>–</td><td>–</td>'+sz.map(function(){return '<td>–</td>';}).join(''):cell(g.gross).replace('</td>',' <span class="nm">median '+n1(g.gross_med)+'</span></td>')+'<td>'+pc((g.up||0)*100,0)+'</td>'+sz.map(function(u){return cell((g.net||{})[String(u)]);}).join(''))+'</tr>';};
+  var rows=[];(Z.groups||[]).forEach(function(g){rows.push(line(g,false));(g.buckets||[]).forEach(function(b){rows.push(line({label:'pools '+b.label,n:b.n,gross:b.gross,gross_med:b.gross_med,up:b.up,net:b.net},true));});});
+  var body='<p class="trk-note">The same closed paper trades priced at each position size, from their recorded entry and exit prices. Price impact shrinks with the position; the fees do not, because they are a share of it: this ledger allows '+pc(Z.fee_pct,1)+' a side (PumpSwap charges 0.25% plus a creator fee of up to 0.95% on coins under $300k market cap; other pools 0.25% to 1%), and a trading bot adds about 1% a side on top. The network fee, '+usd(Z.tx_usd)+' a transaction here, weighs more on a small position. Many small bets do not make an edge: they make the average more certain, so a rule worth having has to make money before costs first. The record is kept at '+usd(Z.usd)+' a trade.</p>'
+    +table(['Group'].concat(head),rows,'cards');
+  return sec('Bet size and costs',body,'tr-sizes');
 }
 
 function exitSec(){
@@ -217,7 +231,7 @@ function render(){
   var w=$('#tradewrap');if(!w)return;load();
   if(!T){w.innerHTML='<p class="empty">The buy and sell ledger starts with the next scan.</p>';return;}
   var y=window.scrollY;
-  w.innerHTML=head()+buySec()+openSec()+warnSec()+recordSec()+benchSec()+quickSec()+exitSec()+varSec()+studySec()+logSec();
+  w.innerHTML=head()+buySec()+openSec()+warnSec()+recordSec()+benchSec()+sizeSec()+quickSec()+exitSec()+varSec()+studySec()+logSec();
   $$('[data-tk]',w).forEach(function(b){b.onclick=function(){U.open(b.dataset.tk);};});
   var mg=$('#tr-models-go',w);if(mg)mg.onclick=function(){U.setView('models');};
   /* card tables stack into labelled rows on a phone: each cell carries its column's name */

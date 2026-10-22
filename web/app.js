@@ -60,7 +60,7 @@ function prep(){
 }
 
 /* ---------- state ---------- */
-var state={view:'map',size:'float',colour:'h1',band:'all',group:'sector',showBand:true,cvd:false,query:'',selected:null,pos:500,
+var state={view:'map',size:'float',colour:'h1',band:'all',group:'sector',showBand:true,cvd:false,query:'',selected:null,pos:100,
   sort:{key:'mcap',dir:-1},tsort:{key:'in',dir:-1},labPop:'entries',labH:'p24',tview:'table',trange:72};
 try{state.cvd=localStorage.getItem('undertow-cvd')==='1';var sp=+localStorage.getItem('undertow-pos');if([100,500,2000,10000].indexOf(sp)>=0)state.pos=sp;}catch(e){}
 
@@ -848,9 +848,14 @@ function refresh(animate){
 }
 function replay(){state.size='mcap';syncSeg('size');refresh(false);setTimeout(function(){state.size='float';syncSeg('size');refresh(true);},RM?0:650);}
 function syncSeg(kind){$$('[data-'+kind+']').forEach(function(b){b.setAttribute('aria-pressed',String(b.dataset[kind]===String(state[kind])));});}
+/* deep links: the address names the open tab (#trade, #models, #corr ...), so a link can open one directly */
+function viewFromHash(){var h=String(location.hash||'').replace(/^#/,'');return h&&/^[a-z]+$/.test(h)&&$('[data-view="'+h+'"]')?h:null;}
+function setHash(v){try{history.replaceState(null,'',v==='map'?location.pathname+location.search:'#'+v);}catch(e){}}
+function goView(v){state.view=v;syncSeg('view');setHash(v);refresh(false);}
 
 function wire(){
-  $$('[data-view]').forEach(function(b){b.onclick=function(){state.view=b.dataset.view;syncSeg('view');refresh(false);};});
+  $$('[data-view]').forEach(function(b){b.onclick=function(){goView(b.dataset.view);};});
+  window.addEventListener('hashchange',function(){var h=viewFromHash();if(h&&h!==state.view){state.view=h;syncSeg('view');refresh(false);}});
   $$('[data-size]').forEach(function(b){b.onclick=function(){state.size=b.dataset.size;syncSeg('size');refresh(true);};});
   $$('[data-group]').forEach(function(b){b.onclick=function(){state.group=b.dataset.group;syncSeg('group');refresh(true);};});
   $$('[data-colour]').forEach(function(b){b.onclick=function(){state.colour=b.dataset.colour;syncSeg('colour');renderLegend();if(state.view==='map'){labelAll();}};});
@@ -876,6 +881,7 @@ function boot(data){
   if(state.selected&&!byId[state.selected]&&!trkBy[state.selected])state.selected=null;
   buildDom();renderTape();renderBandSeg();renderMoves();renderHow();renderLegend();idleCaption();syncSeg('pos');
   if(!wired){wire();wired=true;}
+  if(!boot.done){var hv=viewFromHash();if(hv){state.view=hv;syncSeg('view');}}
   if(state.selected){openX(state.selected);}
   /* open as market cap, then shrink to float cap, so the effect of supply control is visible on first load */
   if(!RM&&state.size==='float'&&state.view==='map'&&!boot.done){state.size='mcap';syncSeg('size');refresh(false);setTimeout(function(){state.size='float';syncSeg('size');refresh(true);},700);}
@@ -1048,7 +1054,7 @@ var HOOKS={};
 function emit(ev,arg){(HOOKS[ev]||[]).forEach(function(fn){try{fn(arg);}catch(e){if(window.console)console.error(e);}});}
 window.Undertow={cfg:function(){return CFG;},data:function(){return D;},token:function(id){return byId[id];},
   selected:function(){return xr.hidden?null:state.selected;},view:function(){return state.view;},
-  setView:function(v){state.view=v;syncSeg('view');refresh(false);},inClaude:IN_CLAUDE,served:SERVED,
+  setView:goView,inClaude:IN_CLAUDE,served:SERVED,
   on:function(ev,fn){(HOOKS[ev]=HOOKS[ev]||[]).push(fn);},toast:toast,esc:esc,usd:usd,pc:pc,ago:ago,when:when,xm:xm,int:int,
   spct:spct,ageH:ageH,dur:dur,tracked:function(id){return trkBy[id];},open:function(id){openX(id);},posSize:function(){return state.pos;},
   /* the latest price the page has for a coin: the live feed's when it has one, else the scan's */

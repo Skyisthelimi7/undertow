@@ -1118,6 +1118,31 @@ def exit_pool_of(bank):
     return C.EXIT_POOL + (MOD.exit_policies(bank.summary) if MOD and bank and bank.summary else [])
 
 
+def reprice_ledger(st, cfg):
+    """Price every recorded paper-trade result again when the ledger's costs change (position size, fee allowance or
+    network fee in config TRADE), from each trade's entry and exit prices, so old and new trades are judged alike. A
+    result recorded before exit liquidity was kept uses the entry's. Returns how many trades were priced again."""
+    key = f'{cfg["usd"]}|{cfg["fee_pct"]}|{cfg.get("tx_usd", 0)}'
+    if st.get_meta("ledger_costs") == key:
+        return 0
+    n = 0
+    for s in st.sigs():
+        out = s["out"] or {}
+        if not out:
+            continue
+        new = {}
+        for pid, o in out.items():
+            v = TRD.net_of(s, o, cfg)
+            new[pid] = [LAB._r(v) if v is not None else o[0]] + list(o[1:])
+        st.set_sig_out(s["id"], new)
+        n += 1
+    st.set_meta("ledger_costs", key)
+    st.commit()
+    log(f"trade ledger: {n} paper trades priced again at ${cfg['usd']:g} a trade, {cfg['fee_pct']:g}% fees a side and "
+        f"${cfg.get('tx_usd', 0):g} a transaction")
+    return n
+
+
 def loaded_exits(exits, bank):
     """The exit-model policies whose models are loaded and fresh enough to call."""
     return {pid for pid in exits if pid.startswith("x:") and bank and bank.fresh and pid in bank.exit}
@@ -1355,6 +1380,7 @@ def trade_step(st, rows, ds_all, now, regime, bank=None, sampler=None, t_dec=Non
     if policy:
         # rules on new data (attention, the minute data) and the models' rules join the bench at once (trade.add_rules)
         added = TRD.add_rules(policy, C.ATTENTION_RULES, now, ATTN_SOURCE)
+        added += TRD.add_rules(policy, C.SIZE_RULES, now, "pool size, after the bet-size study")
         # a redefined quick rule's record restarts at decision time: until then this scan's minute ledger was still
         # buying under the old definition
         restart_quick_records_once(st, policy)
@@ -1522,7 +1548,7 @@ def trade_page(st, policy, feats, rows, now, exit_pool=None, picks=None, sigs=No
     labels = {k: (l, u) for k, l, u in TRD.VARIABLES}
     variables = [{"key": k, "label": labels.get(k, (k, ""))[0], "unit": labels.get(k, (k, ""))[1], **v}
                  for k, v in (policy.get("vars") or {}).items()]
-    return {"cfg": {k: cfg[k] for k in ("usd", "fee_pct", "reentry_h", "min_trades", "min_edge", "z", "promote_after",
+    return {"cfg": {k: cfg.get(k) for k in ("usd", "fee_pct", "tx_usd", "reentry_h", "min_trades", "min_edge", "z", "promote_after",
                                         "retire_after", "every_days", "path_days", "switch_after", "switch_min_gain",
                                         "var_min_rho", "warn_gap")},
             "last_review": policy.get("last_review"), "next_review": policy.get("next_review"),
@@ -1532,7 +1558,51 @@ def trade_page(st, policy, feats, rows, now, exit_pool=None, picks=None, sigs=No
             "record": TRD._r(rec), "bench": bench, "exits": ex, "vars": variables, "warnings": warn,
             "warning_rules": [{**w, "last": (wrec.get(w["id"]) or {}).get("last")} for w in C.SELL_WARNINGS],
             "log": list(reversed(policy.get("log") or []))[:40], "path": st.tpath_stats(),
-            "study": C.TRADE_STUDY, "quick": quick_page(st, policy, bench, sigs, exits, by_rule, now, minute)}
+            "study": C.TRADE_STUDY, "quick": quick_page(st, policy, bench, sigs, exits, by_rule, now, minute),
+            "sizes": size_page(sigs, rules, exits, live_exit, cfg, now)}
+
+
+LIQ_BUCKETS = [("under $20k", 0, 20e3), ("$20k to $50k", 20e3, 50e3), ("$50k to $100k", 50e3, 100e3), ("$100k or more", 100e3, 1e18)]
+
+
+def size_page(sigs, rules, exits, live_exit, cfg, now):
+    """Does a smaller position change the result? The ledger's closed trades priced at each size in cfg["sizes"],
+    from their entry and exit prices: the scans' rules (every entry once, under the live exit), the models' random
+    control, the quick rules and their random control (under their own exits). Price impact shrinks with the position;
+    fees are a share of it, and the network fee weighs more on a small one."""
+    groups = [("scan", "Scan rules (every entry once)", lambda s: not s["rule"].startswith(("m:", "fast_")), False),
+              ("random", "Random picks (the models' control)", lambda s: s["rule"] == "m:random", False),
+              ("quick", "Quick rules (every entry once)", lambda s: s["rule"].startswith("fast_") and s["rule"] != "fast_random", True),
+              ("quick_random", "Quick random control", lambda s: s["rule"] == "fast_random", True)]
+    sizes = list(cfg.get("sizes") or (cfg["usd"],))
+    out = []
+    for gid, label, pick, own in groups:
+        seen, rows = set(), []
+        for s in sigs:
+            if not pick(s):
+                continue
+            pol = (exits.get((rules.get(s["rule"]) or {}).get("exit")) if own else None) or live_exit
+            o = (s["out"] or {}).get(pol["id"])
+            k = (s["mint"], round(s["in_ts"]))
+            if not o or len(o) < 5 or not o[4] or not s["in_price"] or k in seen or not TRD.matured(s["in_ts"], pol, now):
+                continue
+            seen.add(k)
+            rows.append((s, o))
+        if len(rows) < 5:
+            out.append({"id": gid, "label": label, "n": len(rows)})
+            continue
+
+        def stats(rr):
+            g = sorted((o[4] / s["in_price"] - 1) * 100 for s, o in rr)
+            n = len(g)
+            return {"n": n, "gross": LAB._r(sum(g) / n), "gross_med": LAB._r(g[n // 2]), "up": LAB._r(sum(1 for v in g if v > 0) / n),
+                    "net": {str(u): LAB._r(sum(TRD.net_of(s, o, cfg, u) for s, o in rr) / n) for u in sizes}}
+        row = {"id": gid, "label": label, **stats(rows), "liq_med": LAB._r(sorted(s["in_liq"] or 0 for s, _o in rows)[len(rows) // 2])}
+        row["buckets"] = [{"label": bl, **stats(rr)} for bl, lo, hi in LIQ_BUCKETS
+                          for rr in [[(s, o) for s, o in rows if lo <= (s["in_liq"] or 0) < hi]] if len(rr) >= 5]
+        out.append(row)
+    return {"sizes": sizes, "usd": cfg["usd"], "fee_pct": cfg["fee_pct"], "tx_usd": cfg.get("tx_usd", 0), "groups": out,
+            "exit": live_exit["id"]}
 
 
 def quick_page(st, policy, bench, sigs, exits, by_rule, now, minute):
@@ -1725,6 +1795,7 @@ def run(args):
                + ("" if bank.fresh else " (too old to trade)") if bank.summary and bank.summary.get('status') == 'ok' else "")
             + (f"; failed to load: {', '.join(bank.errors[:5])}" if bank.errors else ""))
     exits = {e["id"]: e for e in exit_pool_of(bank)}
+    reprice_ledger(st, C.TRADE)
     # the paper ledger's scan reading, then the minute sampler until the ledger is stepped at decision time
     n_step, closed_scan = scan_step(st, ds_all, now, exits, C.TRADE)
     notify.closes(closed_scan)

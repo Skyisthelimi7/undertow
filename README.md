@@ -33,7 +33,9 @@ shows when the last scan ran and whether the next one is overdue. A copy built w
 
 ## Keeping it live
 
-The live page is **https://skyisthelimi7.github.io/undertow/**. Two pieces keep it live:
+The live page is **https://skyisthelimi7.github.io/undertow/**. Each tab has its own address, so a link can open it:
+`#table`, `#tracker`, `#wait`, `#lab`, `#trade` (Buy & sell), `#corr` (Correlations) and `#models` after the page's
+address. Two pieces keep it live:
 
 * **GitHub Actions rescans every 20 minutes, free.** `.github/workflows/scan.yml` runs the scan, builds the page and
   deploys it to GitHub Pages. It uses no Claude usage and no paid service. See Free hosting.
@@ -217,12 +219,20 @@ The Buy & sell tab is a paper ledger, not advice. Every scan, each coin that pas
 bench of entry rules (`ENTRY_POOL` in the config, `undertow/trade.py`). A rule that fires opens a paper trade once the
 scan's gates are known, at the coin's latest minute price (the scan's own price reading is 10 to 15 minutes older
 than the gates the decision relied on); every later price reading steps the trade through every exit policy on the
-bench (`EXIT_POOL`), so one entry has a result under each way of selling it. Results are after a 1% fee allowance a side plus price impact on a
-$500 position (`TRADE` in the config). Each scan reads prices three ways, in time order: its own reading of every
-price, which steps every open trade at once; one reading a minute while it works out the gates (next section), which
-steps them again; and, once the gates are known, the scan's decisions (a structure gate failed, an exit model says
-sell), carried out at each trade's latest price. A stop fills at the first price read at or past its level, within a
-minute while a scan runs.
+bench (`EXIT_POOL`), so one entry has a result under each way of selling it. Results are on a $100 position after a
+1% fee allowance a side, a $0.05 network fee a transaction and price impact from the pool's liquidity (`TRADE` in the
+config). Each scan reads prices three ways, in time order: its own reading of every price, which steps every open
+trade at once; one reading a minute while it works out the gates (next section), which steps them again; and, once
+the gates are known, the scan's decisions (a structure gate failed, an exit model says sell), carried out at each
+trade's latest price. A stop fills at the first price read at or past its level, within a minute while a scan runs.
+
+* **Bet size.** The ledger was kept at $500 a trade until 22 October 2026, then at $100, with every recorded result
+  priced again from its entry and exit prices. Price impact is the one cost a smaller position shrinks: on a $50k pool
+  it is about 2% a side at $500 and 0.4% at $100. Fees are a share of the position, so they do not shrink: PumpSwap
+  charges 0.25% plus a creator fee that falls with market cap (0.95% under $300k), other pools 0.25% to 1%, and a
+  trading bot adds about 1% a side. The network fee is fixed, so it weighs more on a small bet (0.2% a side at $25).
+  The tab's "Bet size and costs" table prices the same closed trades at $25, $100 and $500, overall and by pool
+  liquidity. Many small bets make the average more certain; they do not make it positive.
 
 * **Live buy signals.** A rule goes live only on its forward record: trades opened after it joined the bench, which it
   was never fitted to. It needs at least 30 matured trades averaging +1% or better after costs with t ≥ 2 (errors
@@ -277,7 +287,8 @@ so the minutes are nearly continuous: the gap is about two minutes a scan, a run
   of 5 or 10%, stops of 5 to 7%, a trailing stop), and a random control that buys a random 0.5% of minutes. They may buy
   a coin only if it passed every gate at the previous scan, since the running scan's gates are not known yet, and only
   if its pool holds $75,000 or more: at $500 a side a round trip costs about 4.6% there (fees plus price impact), so a
-  +5% target barely breaks even, and on a $20,000 pool even a +10% target loses about 2%. A rule buys a coin again only
+  +5% target barely breaks even, and on a $20,000 pool even a +10% target loses about 2% (the floor was set while the
+  ledger was kept at $500; at $100 the same round trip costs about 2.6%). A rule buys a coin again only
   once its last trade there has closed and 30 minutes have passed. Changing a quick rule in the config redefines it on
   the bench and restarts its record while it is under test. Each is judged on its own
   exit against the same bar as every rule, and promoted or retired at the same weekly review. Every quick trade is
@@ -340,6 +351,10 @@ scans, and five models of the trade's return (ridge, random forest, gradient boo
 random-score control. Exit models (logistic regression, random forest, gradient boosting, LightGBM, neural network)
 learn whether selling an open trade now beats holding on to the live exit.
 
+* **Real data only.** Every model learns from this scanner's own readings of real coins and what their prices did next.
+  Nothing is simulated or synthetic: random numbers appear only in the random-score control, the luck line, the
+  LSTM's starting weights and when a very large set of exit decisions is thinned; made-up data appears only in the code
+  tests (`tests/`), which never produce a model the scan uses.
 * **Training.** `.github/workflows/train.yml` runs `undertow/train.py` every 6 hours. It copies the Buy & sell path into
   its own history (kept up to 60 days, beyond the 14 the scanner keeps), labels one sample per coin per hour with the
   paper trade opened there under the live exit, after costs, and trains once there are 1,200 samples on 40 coins. The

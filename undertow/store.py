@@ -282,6 +282,9 @@ class Store:
                         (json.dumps(out, separators=(",", ":")), json.dumps(st, separators=(",", ":")), miss, last_price,
                          last_liq, 1 if done else 0, ref_out_ts, sid))
 
+    def set_sig_out(self, sid, out):
+        self.db.execute("UPDATE tsig SET out=? WHERE id=?", (json.dumps(out, separators=(",", ":")), sid))
+
     def open_sigs(self):
         return [self._sig(r) for r in self.db.execute("SELECT * FROM tsig WHERE done=0")]
 
