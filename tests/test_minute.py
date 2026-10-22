@@ -332,6 +332,22 @@ class Redefine(unittest.TestCase):
         self.assertNotIn(["liq", ">=", C.FAST["min_liq"]], live["all"])
         self.assertEqual(T.sync_rules(pol, C.FAST_RULES, 300.0), [])         # nothing changed since
 
+    def test_the_first_redefinition_restarts_after_the_old_definitions_last_trades(self):
+        d = tempfile.mkdtemp()
+        st = Store(os.path.join(d, "t.db"))
+        pol = T.new_policy(C.EXIT_POOL, C.DEFAULT_EXIT)
+        T.add_rules(pol, C.FAST_RULES, SC.QUICK_RESTART_TS - 800, "test")
+        T.add_rules(pol, C.ATTENTION_RULES, SC.QUICK_RESTART_TS - 800, "test")
+        SC.restart_quick_records_once(st, pol)
+        self.assertTrue(all(r["added"] == SC.QUICK_RESTART_TS for r in pol["rules"] if r.get("fast")))
+        self.assertTrue(all(r["added"] < SC.QUICK_RESTART_TS for r in pol["rules"] if not r.get("fast")))
+        self.assertEqual(json.loads(st.get_meta("trade_policy"))["rules"][0]["added"], pol["rules"][0]["added"])
+        for r in pol["rules"]:
+            r["added"] = 1.0
+        SC.restart_quick_records_once(st, pol)                              # once only
+        self.assertTrue(all(r["added"] == 1.0 for r in pol["rules"]))
+        st.close()
+
 
 class TrainRequest(unittest.TestCase):
     def test_asks_once_when_overdue(self):

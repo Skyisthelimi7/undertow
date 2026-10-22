@@ -1157,6 +1157,25 @@ def quick_trade_exits(exits, live_exit):
         [live_exit] if live_exit in exits and exits[live_exit].get("max_h", 24) > 2 else [])
 
 
+# The scan of 21 Oct 2026 20:10 UTC redefined the quick rules (the pool floor) at its own start time, while its minute
+# ledger kept buying under the old definitions until its decision time, 20:23:32 UTC. Their records restart just after
+# that, once (trade.sync_rules now restarts a record at decision time).
+QUICK_RESTART_TS = 1792614215.0                # 21 Oct 2026 20:23:35 UTC
+
+
+def restart_quick_records_once(st, policy):
+    if st.get_meta("quick_restart_fix"):
+        return
+    n = 0
+    for r in policy.get("rules") or []:
+        if r.get("fast") and r["status"] == "testing" and QUICK_RESTART_TS - 1800 <= (r.get("added") or 0) < QUICK_RESTART_TS:
+            r["added"] = r["since"] = QUICK_RESTART_TS
+            n += 1
+    st.set_meta("trade_policy", json.dumps(policy))
+    st.set_meta("quick_restart_fix", QUICK_RESTART_TS)
+    log(f"trade bench: {n} quick rules' records restart at 20:23:35 UTC on 21 Oct (after the old definitions' last trades)")
+
+
 def start_minutes(st, now, ds_all, lists, exits, loaded_x):
     """Record the scan's reading of the watched coins as their minute at the scan, then start the minute sampler with
     the minute ledger (fast.py). Quick rules may buy only coins that passed every gate at the previous scan, whose
@@ -1336,7 +1355,10 @@ def trade_step(st, rows, ds_all, now, regime, bank=None, sampler=None, t_dec=Non
     if policy:
         # rules on new data (attention, the minute data) and the models' rules join the bench at once (trade.add_rules)
         added = TRD.add_rules(policy, C.ATTENTION_RULES, now, ATTN_SOURCE)
-        added += TRD.sync_rules(policy, [r for r in C.FAST_RULES if r["exit"] in exits], now)
+        # a redefined quick rule's record restarts at decision time: until then this scan's minute ledger was still
+        # buying under the old definition
+        restart_quick_records_once(st, policy)
+        added += TRD.sync_rules(policy, [r for r in C.FAST_RULES if r["exit"] in exits], t_dec)
         added += TRD.add_rules(policy, [r for r in C.FAST_RULES if r["exit"] in exits], now, "quick rule, minute data")
         if MOD and bank and (bank.summary or {}).get("status") == "ok":
             added += TRD.add_rules(policy, MOD.rules_for(bank.summary), now, "model")
