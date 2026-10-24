@@ -227,9 +227,11 @@ the gates are known, the scan's decisions (a structure gate failed, an exit mode
 trade's latest price. A stop fills at the first price read at or past its level, within a minute while a scan runs.
 A take-profit fills at its target, as an order resting at the target would, even when the first price read past it
 was higher (since 24 October 2026, applied to every recorded trade; the price read is kept beside the fill). Booking
-the reading instead had made targets look better than they were: half of the take-profits read more than 2 points
-above +10%, 7% more than 25 points, and in the ones checked against GeckoTerminal's 1-minute candles the biggest
-readings often never traded.
+the reading had made targets look better than a take-profit order would have done: half of all take-profits read
+more than 2 points above +10%, 7% more than 25 points. Replayed on GeckoTerminal's 1-minute candles (the pool's own
+trades), the leading model's 120 trades came to -$0.9 a trade as a +10% order would have sold them, against +$2.6 as
+booked from the readings and -$2.5 at the target. Of its 15 take-profits read 10 or more points past the target, 10
+traded that high within a minute, 4 only 6 to 13 minutes after the reading, and 1 never.
 
 * **Bet size.** The ledger was kept at $500 a trade until 22 October 2026, then at $100, with every recorded result
   priced again from its entry and exit prices. Price impact is the one cost a smaller position shrinks: on a $50k pool
@@ -524,9 +526,10 @@ the page shows when the last scan ran and warns when one is overdue.
 * **The crowd can be gamed** (sock-puppet accounts, coordinated tags). That is why it never gates, and why calls are
   scored against the base rate rather than counted.
 * **Paper trades are not fills.** The ledger prices a trade at DEX Screener's price, once a minute while a scan runs
-  and at every scan, with a fee allowance and a pool-model price impact. A take-profit is booked at its target: a
-  resting order would have sold there, though in a jump straight through the target a fast bot can sell higher, and a
-  reading far past the target is as often a print that never traded. Between scans there is a gap of about two
+  and at every scan, with a fee allowance and a pool-model price impact. A take-profit is booked at its target, what
+  a resting order gets in a steady climb; in a jump straight through the target a fast bot sells higher, and reading
+  once a minute the ledger misses the odd spike inside a minute that an order would have caught. Some readings run
+  ahead of the pool's own trades or never trade at all, which is why the ledger no longer books a sale at them. Between scans there is a gap of about two
   minutes with no reading, and coins outside the watch list (240 at most) are priced at scans only. Real fills add slippage on fast moves, priority fees and failed transactions, and a
   public signal can move a thin pool before you act on it. A live rule's record is evidence about the past, not a
   promise about its next trade.
