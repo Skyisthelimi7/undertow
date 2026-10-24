@@ -20,6 +20,21 @@
 .modelswrap .ip{color:var(--muted);font-size:11px}
 .modelswrap .tkbtn,.corrwrap .tkbtn{font-weight:600;text-decoration:none;font-family:var(--font-mono,ui-monospace,monospace);font-size:12.5px}
 .modelswrap .tkbtn:hover{text-decoration:underline}
+.pnl-wrap{overflow-x:auto;margin:6px 0 4px}
+.pnl-chart{display:block;max-width:none}
+.pnl-chart text{fill:var(--muted);font-family:var(--font-mono);font-size:11px}
+.pnl-chart .gl{stroke:var(--line);stroke-width:1}
+.pnl-chart .zero{stroke:var(--line-strong);stroke-width:1.2;stroke-dasharray:5 4}
+.pnl-chart .ml{fill:none;stroke:var(--fg-2);stroke-opacity:.22;stroke-width:1;stroke-linejoin:round}
+.pnl-chart .med{fill:none;stroke:var(--fg);stroke-width:2;stroke-linejoin:round}
+.pnl-chart .ctl{fill:none;stroke:var(--warn);stroke-width:2;stroke-dasharray:6 4;stroke-linejoin:round}
+.pnl-chart .best{fill:none;stroke:var(--accent);stroke-width:2.6;stroke-linejoin:round}
+.pnl-key{display:flex;flex-wrap:wrap;gap:4px 16px;margin:2px 0 12px;font-size:12px;color:var(--fg-2)}
+.pnl-key span{display:inline-flex;align-items:center;gap:6px}
+.pnl-key i{display:inline-block;width:18px;height:0;border-top:2.6px solid var(--accent)}
+.pnl-key i.k-med{border-top:2px solid var(--fg)}
+.pnl-key i.k-ctl{border-top:2px dashed var(--warn)}
+.pnl-key i.k-ml{border-top:1px solid color-mix(in srgb,var(--fg-2) 35%,transparent)}
 svg.mini{flex:none;overflow:visible}
 svg.mini path{fill:none;stroke:var(--accent);stroke-width:1.6;stroke-linejoin:round;stroke-linecap:round}
 @media (max-width:640px){

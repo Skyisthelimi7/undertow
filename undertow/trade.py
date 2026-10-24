@@ -175,7 +175,11 @@ def step(pol, pos, st, price, liq, c1h, now, cfg, guard=None, sell=False, tick=F
     place. guard: a reason to sell at once whatever the policy says. sell: an exit model's call to sell now (for a
     policy with a model; its target and time limit still apply). tick: a minute reading between scans rather than a
     scan's; "cooled off" compares one scan's price with the last, so it is judged at scans only. Returns None to hold,
-    or (net %, hours held, reason, price)."""
+    or (net %, hours held, reason, fill price, price read).
+
+    Fills: a take-profit sells at its target, as an order watching the price would as the price passes it, even when
+    the reading that shows it is higher (the price had run on between two readings). Every other sale fills at the
+    price read, which for a stop or a trailing stop is the conservative side of its level."""
     x = price / pos["in_price"]
     st["peak"] = max(st["peak"], price)
     peak_x = st["peak"] / pos["in_price"]
@@ -201,7 +205,10 @@ def step(pol, pos, st, price, liq, c1h, now, cfg, guard=None, sell=False, tick=F
         st["prev"] = price
     if why is None:
         return None
-    return (net_ret(x, pos["in_liq"], liq, cfg), held, why, price)
+    fill = price
+    if why == "target":
+        fill = min(price, pos["in_price"] * (1 + pol["tp"] / 100))
+    return (net_ret(fill / pos["in_price"], pos["in_liq"], liq, cfg), held, why, fill, price)
 
 
 def levels(pol, pos, peak):
@@ -240,7 +247,8 @@ def start_states(price, policies):
 
 def advance(sig, obs, now, policies, cfg, tick=False):
     """Step one paper trade through each exit policy still undecided for it, with this scan's reading of its coin.
-    sig: in_ts, in_price, in_liq, out {policy: [net, hours, reason, ts, price, liquidity]}, st {policy: {peak, prev}} (one entry
+    sig: in_ts, in_price, in_liq, out {policy: [net, hours, reason, ts, fill price, liquidity, the price read when a
+    target filled below it]}, st {policy: {peak, prev}} (one entry
     per undecided policy), miss, last_price, last_liq. obs: {price, liq, c1h, hard, xm} or None when nothing prices
     the coin this scan; xm: {policy: True} where an exit model says sell this trade now. A policy no longer on the
     bench is dropped. tick: obs is a minute reading between scans (see step). Returns (out, st, miss, last_price,
@@ -266,6 +274,8 @@ def advance(sig, obs, now, policies, cfg, tick=False):
         r = step(pol, pos, st[pid], price, liq, c1h, now, cfg, guard, bool(xm.get(pid)), tick)
         if r:
             out[pid] = [LAB._r(r[0]), round(r[1], 3), r[2], now, LAB._r(r[3]), LAB._r(liq) if liq else None]
+            if r[4] != r[3]:                   # the price read, when the fill was at the target below it
+                out[pid].append(LAB._r(r[4]))
             st.pop(pid)
     return out, st, miss, lp, ll, not st
 

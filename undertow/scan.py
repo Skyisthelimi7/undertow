@@ -1,7 +1,7 @@
 """Orchestrator: discover -> refresh -> enrich -> gate -> track -> momentum -> export.
 Run:  python3 -m undertow.scan run --db undertow.db --out docs/data.json
       python3 -m undertow.scan inspect <MINT>"""
-import argparse, csv, json, os, sys, time
+import argparse, csv, json, math, os, sys, time
 from collections import defaultdict
 from . import config as C, sources as S, gates as G, momentum as M, tgrisk, signals as SG, tracker as TR, notify, http, lab as LAB
 from . import review as REV, community as COM, trade as TRD, attention as ATT, corr as CORR, minute as MIN, fast as FAST
@@ -1118,28 +1118,41 @@ def exit_pool_of(bank):
     return C.EXIT_POOL + (MOD.exit_policies(bank.summary) if MOD and bank and bank.summary else [])
 
 
-def reprice_ledger(st, cfg):
-    """Price every recorded paper-trade result again when the ledger's costs change (position size, fee allowance or
-    network fee in config TRADE), from each trade's entry and exit prices, so old and new trades are judged alike. A
-    result recorded before exit liquidity was kept uses the entry's. Returns how many trades were priced again."""
-    key = f'{cfg["usd"]}|{cfg["fee_pct"]}|{cfg.get("tx_usd", 0)}'
+LEDGER_FILLS = "tp-at-target"                  # how sales fill (trade.step); a change prices the ledger again
+
+
+def reprice_ledger(st, cfg, exits):
+    """Price every recorded paper-trade result again when the ledger's costs or fills change (position size, fee
+    allowance or network fee in config TRADE; LEDGER_FILLS), from each trade's entry and exit prices, so old and new
+    trades are judged alike. A take-profit recorded at a reading above its target is filled at the target, keeping the
+    reading. A result recorded before exit liquidity was kept uses the entry's. Returns how many trades were priced
+    again."""
+    key = f'{cfg["usd"]}|{cfg["fee_pct"]}|{cfg.get("tx_usd", 0)}|{LEDGER_FILLS}'
     if st.get_meta("ledger_costs") == key:
         return 0
-    n = 0
+    n = capped = 0
     for s in st.sigs():
         out = s["out"] or {}
         if not out:
             continue
         new = {}
         for pid, o in out.items():
+            o = list(o)
+            tp = (exits.get(pid) or {}).get("tp")
+            if (len(o) > 4 and o[2] == "target" and tp is not None and o[4] and s["in_price"]
+                    and o[4] > s["in_price"] * (1 + tp / 100) * 1.000001):
+                read = o[6] if len(o) > 6 and o[6] else o[4]
+                o = (o + [None] * 6)[:6] + [read]
+                o[4] = LAB._r(s["in_price"] * (1 + tp / 100))
+                capped += 1
             v = TRD.net_of(s, o, cfg)
-            new[pid] = [LAB._r(v) if v is not None else o[0]] + list(o[1:])
+            new[pid] = [LAB._r(v) if v is not None else o[0]] + o[1:]
         st.set_sig_out(s["id"], new)
         n += 1
     st.set_meta("ledger_costs", key)
     st.commit()
     log(f"trade ledger: {n} paper trades priced again at ${cfg['usd']:g} a trade, {cfg['fee_pct']:g}% fees a side and "
-        f"${cfg.get('tx_usd', 0):g} a transaction")
+        f"${cfg.get('tx_usd', 0):g} a transaction; {capped} take-profits that had filled above their target now fill at it")
     return n
 
 
@@ -1438,11 +1451,13 @@ def trade_step(st, rows, ds_all, now, regime, bank=None, sampler=None, t_dec=Non
     return policy, feats, changes, picks, sells, minute, closed_dec
 
 
-def trade_page(st, policy, feats, rows, now, exit_pool=None, picks=None, sigs=None, minute=None):
-    """What the Buy & sell tab shows. Open trades carry their exit levels so the page can flag a sell between scans."""
+def trade_page(st, policy, feats, rows, now, exit_pool=None, picks=None, sigs=None, minute=None, pnl=None):
+    """What the Buy & sell tab shows. Open trades carry their exit levels so the page can flag a sell between scans.
+    pnl: every rule's running profit and loss (pnl_by_rule)."""
     if not policy:
         return None
     cfg, exit_pool, picks = C.TRADE, exit_pool or C.EXIT_POOL, picks or {}
+    pnl_r = (pnl or {}).get("rules") or {}
     exits = {e["id"]: e for e in exit_pool}
     if policy["exit"] not in exits:            # a live exit model whose models are missing this scan
         policy = {**policy, "exit": C.DEFAULT_EXIT}
@@ -1493,7 +1508,7 @@ def trade_page(st, policy, feats, rows, now, exit_pool=None, picks=None, sigs=No
         fs = TRD.summarise([t for t in fwd.get(r["id"], []) if t["in_ts"] >= (since or 0)])
         bench.append({k: r.get(k) for k in ("id", "label", "all", "status", "source", "added", "since", "reason", "last",
                                             "streak", "model", "fast", "exit", "random")}
-                     | {"fwd_now": TRD._r(fs), "open": n_open.get(r["id"], 0)})
+                     | {"fwd_now": TRD._r(fs), "open": n_open.get(r["id"], 0), "pnl": pnl_r.get(r["id"])})
 
     # this scan: which coins each rule (or model) fires on, and how close the coins come to the rules that matter most;
     # quick rules buy on the minute data, not at the scan
@@ -1560,6 +1575,80 @@ def trade_page(st, policy, feats, rows, now, exit_pool=None, picks=None, sigs=No
             "log": list(reversed(policy.get("log") or []))[:40], "path": st.tpath_stats(),
             "study": C.TRADE_STUDY, "quick": quick_page(st, policy, bench, sigs, exits, by_rule, now, minute),
             "sizes": size_page(sigs, rules, exits, live_exit, cfg, now)}
+
+
+def pnl_by_rule(sigs, older, carried, rules, cfg, now, series_for=lambda rid: rid.startswith("m:"), max_points=120):
+    """Every rule's running paper profit and loss in dollars, at the ledger's position size, since it started testing
+    (its `added` time; a redefined rule's record restarts with it): closed trades at their result after costs under
+    the exit each was held to, open trades marked to their last price after the costs of selling there, and trades
+    already pruned from the ledger from pnl_carry. Every trade counts from the moment it opens, so no result is left
+    out for being slow to settle. sigs, older: the trades in the pages' window and the older ones still stored.
+    Returns {"rules": {rule: {since, real, open, total, n, n_open, wins, first, peak}}, "series": a cumulative realised
+    series for the rules series_for picks (the models), by close time on one time axis: {t0, step, v: {rule: [$ at the
+    end of each step]}}}; peak is the most trades open at once among those still stored."""
+    usd = cfg["usd"]
+    acc = {rid: {"since": r.get("added"), "real": 0.0, "open": 0.0, "n": 0, "n_open": 0, "wins": 0, "first": None}
+           for rid, r in rules.items()}
+    ev, marks = defaultdict(list), defaultdict(list)
+    for s in list(older) + list(sigs):
+        a = acc.get(s["rule"])
+        if a is None or s["in_ts"] < (a["since"] or 0):
+            continue
+        o = (s["out"] or {}).get(s["ref"])
+        if o:
+            v = o[0] / 100 * usd
+            a["real"] += v
+            a["n"] += 1
+            a["wins"] += 1 if o[0] > 0 else 0
+            ev[s["rule"]].append((o[3], v))
+            marks[s["rule"]] += [(s["in_ts"], 1), (o[3], -1)]
+        elif not s.get("done") and s["in_price"]:
+            last = s.get("last_price") or s["in_price"]
+            a["open"] += TRD.net_ret(last / s["in_price"], s["in_liq"], s.get("last_liq"), cfg) / 100 * usd
+            a["n_open"] += 1
+            marks[s["rule"]].append((s["in_ts"], 1))
+        else:                                  # settled without a result under its exit (that exit left the bench)
+            continue
+        a["first"] = s["in_ts"] if a["first"] is None else min(a["first"], s["in_ts"])
+    for rid, days in (carried or {}).items():
+        a = acc.get(rid)
+        if a is None:
+            continue
+        for day, n, net, wins, t0, t1 in days:
+            if a["since"] and t1 <= a["since"]:   # all closed before the rule started (a redefined rule's old trades)
+                continue
+            a["real"] += net / 100 * usd
+            a["n"] += n
+            a["wins"] += wins
+            a["first"] = t0 if a["first"] is None else min(a["first"], t0)
+            ev[rid].append((t1, net / 100 * usd))
+    out = {}
+    for rid, a in acc.items():
+        cur = peak = 0
+        for _t, d in sorted(marks.get(rid, ())):
+            cur += d
+            peak = max(peak, cur)
+        out[rid] = {**a, "real": round(a["real"], 2), "open": round(a["open"], 2), "total": round(a["real"] + a["open"], 2),
+                    "peak": peak}
+    pick = {rid: sorted(v) for rid, v in ev.items() if series_for(rid)}
+    series = None
+    ts = [t for v in pick.values() for t, _x in v]
+    if ts:
+        t0 = math.floor(min(ts) / H) * H
+        step = max(1, math.ceil((now - t0) / H / max_points)) * H
+        n = int((now - t0) // step) + 1
+        vals = {}
+        for rid, v in pick.items():
+            row, cum, j = [], 0.0, 0
+            for i in range(n):
+                end = t0 + (i + 1) * step
+                while j < len(v) and v[j][0] < end:
+                    cum += v[j][1]
+                    j += 1
+                row.append(round(cum))
+            vals[rid] = row
+        series = {"t0": t0, "step": step, "n": n, "v": vals}
+    return {"rules": out, "series": series, "usd": usd}
 
 
 LIQ_BUCKETS = [("under $20k", 0, 20e3), ("$20k to $50k", 20e3, 50e3), ("$50k to $100k", 50e3, 100e3), ("$100k or more", 100e3, 1e18)]
@@ -1635,6 +1724,7 @@ def quick_page(st, policy, bench, sigs, exits, by_rule, now, minute):
             "vars": [{"key": k, "label": l, "unit": u} for k, l, u in MIN.VARIABLES]}
 
 
+MOD_RANDOM = "random"                     # the random control's model id (models.RANDOM_ID)
 ENTRY_KEYS = ("id", "slug", "algo", "family", "kind", "set", "n_vars", "n_test", "auc", "auc_sd", "train_auc", "gap",
               "accuracy", "balanced_acc", "brier", "logloss", "ic", "picks", "pick_coins", "pick_win", "pick_net", "pick_med",
               "pick_t", "base_net", "edge", "luck_one", "luck_best", "beats_luck", "thr", "leading", "train_rows",
@@ -1643,9 +1733,10 @@ EXIT_KEYS = ("id", "slug", "algo", "family", "n_vars", "decisions", "auc", "trai
              "trades", "net", "base_net", "gain", "gain_t", "early", "thr", "leading", "seconds", "error")
 
 
-def models_page(st, bank, policy, tpage, now, picks, sells, sigs=None):
-    """What the Models tab shows: every model's walk-forward test, its forward paper record under the live exit, the
-    exit models against the live exit on the same trades, and every model trade with its coin and time."""
+def models_page(st, bank, policy, tpage, now, picks, sells, sigs=None, pnl=None):
+    """What the Models tab shows: every model's walk-forward test, its forward paper record under the live exit and its
+    running paper profit and loss since it started (pnl: pnl_by_rule), the exit models against the live exit on the
+    same trades, and every model trade with its coin and time."""
     S = (bank.summary if bank else None) or {}
     out = {"available": MOD is not None, "status": S.get("status") or "waiting for the first training run",
            "study": C.ML_STUDY, "cfg": {k: C.MODELS[k] for k in ("every_h", "top_share", "exit_thr", "fold_h", "min_samples",
@@ -1678,6 +1769,7 @@ def models_page(st, bank, policy, tpage, now, picks, sells, sigs=None):
         entry.append({k: m.get(k) for k in ENTRY_KEYS}
                      | {"rule": rid, "status": r.get("status"), "verdict": (r.get("last") or {}).get("verdict"),
                         "streak": r.get("streak"), "since": r.get("added"), "fwd": TRD._r(TRD.summarise(done)),
+                        "pnl": ((pnl or {}).get("rules") or {}).get(rid),
                         "trades": len(ss), "open": sum(1 for s in ss if lid not in (s["out"] or {})),
                         "now": len(picks.get(m["id"], {})),
                         "last_entry": {"sym": last["sym"], "mint": last["mint"], "ts": last["in_ts"],
@@ -1714,8 +1806,17 @@ def models_page(st, bank, policy, tpage, now, picks, sells, sigs=None):
                 xlog.append({"ts": v[3], "sym": s["sym"], "mint": s["mint"], "model": pid, "rule": s["rule"], "in_ts": s["in_ts"],
                              "h": v[1], "ret": v[0], "price": v[4], "live_ret": ref[0] if ref else None})
     xlog.sort(key=lambda x: -x["ts"])
+    ser = (pnl or {}).get("series")
+    if ser:                                    # the chart's lines: the models trained this time
+        keep = {e["rule"] for e in entry}
+        ser = {**ser, "v": {k: v for k, v in ser["v"].items() if k in keep}}
+    mods = [e["pnl"] for e in entry if e.get("pnl") and e["id"] != MOD_RANDOM]
     out.update(entry=entry, exit=exit_rows, log=log_rows, exit_log=xlog[:150], exit_sells=len(xlog),
-               live_exit={"id": live_exit["id"], "label": TRD.exit_label(live_exit)}, trades_total=len(sigs))
+               live_exit={"id": live_exit["id"], "label": TRD.exit_label(live_exit)}, trades_total=len(sigs),
+               pnl_series=ser, pnl_usd=cfg["usd"],
+               pnl_all={"total": round(sum(p["total"] for p in mods), 2), "real": round(sum(p["real"] for p in mods), 2),
+                        "open": round(sum(p["open"] for p in mods), 2), "n": sum(p["n"] + p["n_open"] for p in mods),
+                        "up": sum(1 for p in mods if p["total"] > 0), "models": len(mods)})
     return out
 
 
@@ -1795,7 +1896,7 @@ def run(args):
                + ("" if bank.fresh else " (too old to trade)") if bank.summary and bank.summary.get('status') == 'ok' else "")
             + (f"; failed to load: {', '.join(bank.errors[:5])}" if bank.errors else ""))
     exits = {e["id"]: e for e in exit_pool_of(bank)}
-    reprice_ledger(st, C.TRADE)
+    reprice_ledger(st, C.TRADE, exits)
     # the paper ledger's scan reading, then the minute sampler until the ledger is stepped at decision time
     n_step, closed_scan = scan_step(st, ds_all, now, exits, C.TRADE)
     notify.closes(closed_scan)
@@ -1842,10 +1943,13 @@ def run(args):
     meta["call_base_rate"] = round(COM.base_rate(rate), 4)       # what rug calls are scored against (see community.py)
     meta["call_base_rate_measured"] = rate is not None             # False: the default, until a fortnight has settled
     meta["community"] = community
-    sigs = st.sigs(now - C.TRADE["window_days"] * 86400)          # read once for both tabs
-    tpage = trade_page(st, tpolicy, tfeats, rows, now, exit_pool_of(bank), picks, sigs, minute)
+    since = now - C.TRADE["window_days"] * 86400
+    sigs = st.sigs(since)                                         # read once for both tabs
+    pnl = pnl_by_rule(sigs, st.sigs_before(since), st.pnl_carried(),
+                      {r["id"]: r for r in (tpolicy or {}).get("rules") or []}, C.TRADE, now)
+    tpage = trade_page(st, tpolicy, tfeats, rows, now, exit_pool_of(bank), picks, sigs, minute, pnl)
     meta["trade"] = tpage
-    meta["models"] = models_page(st, bank, tpolicy, tpage, now, picks, sells, sigs)
+    meta["models"] = models_page(st, bank, tpolicy, tpage, now, picks, sells, sigs, pnl)
     meta["corr"] = corr_page(st, now)
     doc = export(st, rows, handles, now, meta, args.out)
     write_csv(os.path.join(os.path.dirname(os.path.abspath(args.out)), "tracker.csv"), tracker_rows(st, rows, now))

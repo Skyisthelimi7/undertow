@@ -44,6 +44,8 @@ CREATE TABLE IF NOT EXISTS tick(ts REAL, mint TEXT, price REAL, liq REAL, mc REA
 CREATE INDEX IF NOT EXISTS ix_tick_ts ON tick(ts);
 CREATE TABLE IF NOT EXISTS feed(ts REAL, mint TEXT, kind TEXT, amount REAL, total REAL, impressions REAL, at REAL);
 CREATE INDEX IF NOT EXISTS ix_feed ON feed(mint, ts);
+CREATE TABLE IF NOT EXISTS pnl_carry(rule TEXT, day INTEGER, n INTEGER, net REAL, wins INTEGER, first_ts REAL,
+  last_ts REAL, PRIMARY KEY(rule, day));
 """
 # tpath states: I passed every gate, W on watch (failing a soft gate once), E entering, O out, X failed a structure
 # gate this scan, G not a candidate this scan (out of range or unpriced: price only)
@@ -299,10 +301,45 @@ class Store:
 
     def prune_sigs(self, before, models_before=None):
         """Settled paper trades of rules that were not live when they opened, once older than `before`; the models'
-        (many more of them) once older than `models_before`."""
-        self.db.execute("DELETE FROM tsig WHERE in_ts<? AND live=0 AND done=1", (before,))
+        (many more of them) once older than `models_before`. Each one's result is carried first (pnl_carry), so a
+        rule's running profit and loss since it started still counts it."""
+        where = [("in_ts<? AND live=0 AND done=1", (before,))]
         if models_before:
-            self.db.execute("DELETE FROM tsig WHERE in_ts<? AND live=0 AND done=1 AND rule LIKE 'm:%'", (models_before,))
+            where.append(("in_ts<? AND live=0 AND done=1 AND rule LIKE 'm:%'", (models_before,)))
+        for cond, args in where:
+            self._carry(self.db.execute(f"SELECT rule, in_ts, ref, out FROM tsig WHERE {cond}", args).fetchall())
+            self.db.execute(f"DELETE FROM tsig WHERE {cond}", args)
+
+    def _carry(self, rows):
+        """Add pruned trades' results (net % under the exit each was held to) to pnl_carry, by rule and entry day."""
+        add = {}
+        for rule, in_ts, ref, out in rows:
+            o = (json.loads(out) if out else {}).get(ref)
+            if not o:
+                continue
+            k = (rule, int(in_ts // 86400))
+            a = add.setdefault(k, [0, 0.0, 0, in_ts, o[3]])
+            a[0] += 1
+            a[1] += o[0]
+            a[2] += 1 if o[0] > 0 else 0
+            a[3], a[4] = min(a[3], in_ts), max(a[4], o[3])
+        for (rule, day), (n, net, wins, t0, t1) in add.items():
+            self.db.execute(
+                """INSERT INTO pnl_carry(rule, day, n, net, wins, first_ts, last_ts) VALUES(?,?,?,?,?,?,?)
+                   ON CONFLICT(rule, day) DO UPDATE SET n=n+excluded.n, net=net+excluded.net, wins=wins+excluded.wins,
+                   first_ts=MIN(first_ts, excluded.first_ts), last_ts=MAX(last_ts, excluded.last_ts)""",
+                (rule, day, n, net, wins, t0, t1))
+
+    def pnl_carried(self):
+        """{rule: [(day, n, net % summed, wins, first entry, last close)]}: the results of trades pruned from tsig."""
+        out = {}
+        for r in self.db.execute("SELECT rule, day, n, net, wins, first_ts, last_ts FROM pnl_carry ORDER BY rule, day"):
+            out.setdefault(r[0], []).append(tuple(r[1:]))
+        return out
+
+    def sigs_before(self, before):
+        """Paper trades opened before `before` (the ones older than the pages' window that are still stored)."""
+        return [self._sig(r) for r in self.db.execute("SELECT * FROM tsig WHERE in_ts<? ORDER BY in_ts", (before,))]
 
     def prune_attention(self, before):
         """Drop the attention records of coins last read before `before` (no longer candidates), keeping each record's

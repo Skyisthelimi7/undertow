@@ -57,7 +57,7 @@ def main():
     exits = {e["id"]: e for e in C.EXIT_POOL}
     pol = exits.get((policy or {}).get("exit")) or exits[C.DEFAULT_EXIT]
     log(f"label: {pol['id']} ({MOD.TRD.exit_label(pol)})")
-    s = MOD.train_all(path, pol, C.TRADE, C.MODELS, C.MODEL_SETS, a.dir, now, log)
+    s = MOD.train_all(path, pol, C.TRADE, C.MODELS, C.MODEL_SETS, a.dir, now, log, C.MODEL_SET_ALGOS)
     ok = [m for m in s.get("entry") or [] if not m.get("error")]
     log(f"done: {s.get('status')}; {len(ok)} entry models, {len(s.get('exit') or [])} exit models"
         + (f" in {s['seconds']}s" if s.get("seconds") is not None else ""))

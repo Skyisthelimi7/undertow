@@ -59,14 +59,27 @@ class Exits(unittest.TestCase):
         return None
 
     def test_each_exit(self):
-        self.assertEqual(self.run_path({"tp": 10, "max_h": 8}, [1.05, 1.12]), (12.0, "target", 2))
-        self.assertEqual(self.run_path({"sl": 20, "max_h": 8}, [0.9, 0.7]), (-30.0, "stop", 2))     # fills at the scan price
+        # a take-profit fills at its target even when the reading that shows it is higher; a stop at the price read
+        self.assertEqual(self.run_path({"tp": 10, "max_h": 8}, [1.05, 1.12]), (10.0, "target", 2))
+        self.assertEqual(self.run_path({"sl": 20, "max_h": 8}, [0.9, 0.7]), (-30.0, "stop", 2))
         self.assertEqual(self.run_path({"trail": 25, "arm": 20, "max_h": 24}, [1.3, 1.5, 1.1])[1:], ("trailing stop", 3))
         self.assertIsNone(self.run_path({"trail": 25, "arm": 60, "max_h": 24}, [1.3, 1.5, 1.1]))          # never armed
         self.assertEqual(self.run_path({"cool": 30, "cool_drop": 5, "max_h": 24}, [1.2, 1.4, 1.35, 1.2])[1:], ("cooled off", 4))
         self.assertEqual(self.run_path({"fade": 20, "max_h": 24}, [1, 1, 1, 0.9, 0.85], c1h={4: -10, 5: -25})[1:], ("fading", 5))
         self.assertEqual(self.run_path({"max_h": 1}, [1, 1, 1, 1.02])[1:], ("time", 4))
         self.assertEqual(self.run_path({"tp": 10, "max_h": 8}, [1.0, 1.0], guard_at=2)[1:], ("structure gate failed", 2))
+
+    def test_a_target_fill_keeps_the_price_read(self):
+        pos, st = {"in_ts": 0, "in_price": 2.0, "in_liq": 1e12}, T.new_state(2.0)
+        r = T.step({"tp": 10, "max_h": 8}, pos, st, 3.0, 1e12, None, 900, self.cfg)
+        self.assertEqual((r[2], r[3], r[4]), ("target", 2.2, 3.0))
+        sig = {"in_ts": 0, "in_price": 2.0, "in_liq": 1e12, "out": {}, "st": {"tp10": T.new_state(2.0)}}
+        cfg, pols = {**C.TRADE, "fee_pct": 0.0}, {"tp10": {"id": "tp10", "tp": 10, "max_h": 8}}
+        out = T.advance(sig, {"price": 3.0, "liq": 1e12}, 900, pols, cfg)[0]
+        self.assertEqual(out["tp10"][4], 2.2)                               # filled at the target
+        self.assertEqual(out["tp10"][6], 3.0)                               # the reading kept beside it
+        out = T.advance(sig, {"price": 2.2, "liq": 1e12}, 900, pols, cfg)[0]
+        self.assertEqual(len(out["tp10"]), 6)                               # read at the target: nothing extra
 
     def test_levels(self):
         lv = T.levels({"tp": 10, "sl": 20, "trail": 25, "arm": 20, "max_h": 8}, {"in_ts": 0, "in_price": 2.0}, 2.6)
@@ -379,6 +392,62 @@ class Ledger(unittest.TestCase):
         self.assertEqual(SC.seed_tpath(st, t0 + 21 * 900), 0)               # only once
 
 
+class RunningPnL(unittest.TestCase):
+    """Each rule's running paper profit and loss in dollars since it started (scan.pnl_by_rule), and the results of
+    pruned trades carried on (store.pnl_carry)."""
+
+    def sig(self, rule, mint, in_ts, out=None, last=None, done=None, ref="tp10_8h", price=1.0, liq=1e9):
+        return {"rule": rule, "mint": mint, "in_ts": in_ts, "in_price": price, "in_liq": liq, "ref": ref,
+                "out": {ref: out} if out else {}, "last_price": last, "last_liq": liq,
+                "done": 1 if out else 0 if done is None else done}
+
+    def test_closed_open_and_carried_trades_add_up(self):
+        cfg = {**C.TRADE, "usd": 100}
+        rules = {"m:a": {"id": "m:a", "added": 10 * H}, "r": {"id": "r", "added": 0}}
+        sigs = [self.sig("m:a", "A", 11 * H, [12.0, 1.0, "target", 12 * H, 1.1]),
+                self.sig("m:a", "B", 11.5 * H, [-8.0, 2.0, "stop", 13.5 * H, 0.9]),
+                self.sig("m:a", "C", 13 * H, last=1.2),
+                self.sig("m:a", "D", 9 * H, [50.0, 1.0, "target", 10 * H, 1.5]),       # before the model started
+                self.sig("m:b", "E", 11 * H, [30.0, 1.0, "target", 12 * H, 1.3]),       # not on the bench
+                self.sig("r", "F", 11 * H, last=1.0, done=1)]                           # settled with no result
+        carried = {"m:a": [(0, 3, 9.0, 2, 1 * H, 2 * H)], "r": [(0, 2, -4.0, 0, 1 * H, 3 * H)]}
+        got = SC.pnl_by_rule(sigs, [], carried, rules, cfg, 14 * H)
+        a = got["rules"]["m:a"]
+        mark = T.net_ret(1.2, 1e9, 1e9, cfg)
+        self.assertAlmostEqual(a["real"], 12.0 - 8.0)                       # the carried trades closed before it started
+        self.assertAlmostEqual(a["open"], round(mark, 2))
+        self.assertAlmostEqual(a["total"], round(4.0 + mark, 2))
+        self.assertEqual((a["n"], a["n_open"], a["wins"], a["first"], a["peak"]), (2, 1, 1, 11 * H, 2))
+        self.assertEqual(got["rules"]["r"]["real"], -4.0)                   # carried trades count
+        self.assertEqual(got["rules"]["r"]["n"], 2)
+        self.assertNotIn("m:b", got["rules"])
+        ser = got["series"]                                                 # the models' realised P/L by close time
+        self.assertEqual(ser["v"]["m:a"][-1], 4)
+        self.assertEqual(len(ser["v"]["m:a"]), ser["n"])
+        self.assertNotIn("r", ser["v"])
+        # $500 a trade scales the dollars
+        self.assertAlmostEqual(SC.pnl_by_rule(sigs, [], {}, rules, {**cfg, "usd": 500}, 14 * H)["rules"]["m:a"]["real"], 20.0)
+
+    def test_pruned_trades_are_carried(self):
+        st = Store(os.path.join(tempfile.mkdtemp(), "t.db"))
+        for i, ret in enumerate((5.0, -3.0, 7.0)):
+            sid = st.add_sig("m:a", f"M{i}", "S", i * H, 1.0, 1e5, 1e6, {}, "tp10_8h", False, {})
+            st.update_sig(sid, {"tp10_8h": [ret, 1.0, "time", i * H + H, 1.0]}, {}, 0, 1.0, 1e5, True, i * H + H)
+        live = st.add_sig("m:a", "L", "S", 0.5 * H, 1.0, 1e5, 1e6, {}, "tp10_8h", True, {})
+        st.update_sig(live, {"tp10_8h": [1.0, 1.0, "time", 2 * H, 1.0]}, {}, 0, 1.0, 1e5, True, 2 * H)
+        st.commit()
+        st.prune_sigs(100 * H, 100 * H)
+        st.commit()
+        self.assertEqual([s["mint"] for s in st.sigs()], ["L"])             # live trades are kept for good
+        self.assertEqual(st.pnl_carried(), {"m:a": [(0, 3, 9.0, 2, 0.0, 3 * H)]})
+        st.prune_sigs(100 * H, 100 * H)                                     # nothing new to carry
+        self.assertEqual(st.pnl_carried()["m:a"][0][1], 3)
+        rules = {"m:a": {"id": "m:a", "added": 0}}
+        p = SC.pnl_by_rule(st.sigs(), [], st.pnl_carried(), rules, {**C.TRADE, "usd": 100}, 10 * H)["rules"]["m:a"]
+        self.assertEqual((p["n"], p["real"]), (4, 10.0))
+        st.close()
+
+
 class Sizes(unittest.TestCase):
     """The ledger's position size: costs by size, pricing recorded results again, and the page's size table."""
 
@@ -394,19 +463,39 @@ class Sizes(unittest.TestCase):
         self.assertAlmostEqual(T.net_of(sig, o[:5], cfg, 500), T.net_ret(1.1, 50_000, 50_000, cfg, 500))  # no exit liquidity kept
         self.assertIsNone(T.net_of(sig, [0.0, 1.0, "time", 0.0], cfg))
 
+    EXITS = {"tp10_8h": {"id": "tp10_8h", "tp": 10, "max_h": 8}}
+
     def test_recorded_results_are_priced_again_once_when_the_costs_change(self):
         st = Store(os.path.join(tempfile.mkdtemp(), "t.db"))
         old = {**C.TRADE, "usd": 500, "tx_usd": 0.0}
         sid = st.add_sig("r", "A", "A", 0.0, 1.0, 30_000, 1e6, {}, "tp10_8h", False, {})
-        o = [T.net_ret(1.2, 30_000, 30_000, old), 2.0, "target", 7200.0, 1.2]
-        st.update_sig(sid, {"tp10_8h": o}, {}, 0, 1.2, 30_000, True, 7200.0)
+        o = [T.net_ret(1.08, 30_000, 30_000, old), 8.0, "time", 28800.0, 1.08]
+        st.update_sig(sid, {"tp10_8h": o}, {}, 0, 1.08, 30_000, True, 28800.0)
         st.commit()
-        self.assertEqual(SC.reprice_ledger(st, C.TRADE), 1)
+        self.assertEqual(SC.reprice_ledger(st, C.TRADE, self.EXITS), 1)
         got = st.sigs()[0]["out"]["tp10_8h"]
-        self.assertAlmostEqual(got[0], T.net_ret(1.2, 30_000, 30_000, C.TRADE), places=2)
+        self.assertAlmostEqual(got[0], T.net_ret(1.08, 30_000, 30_000, C.TRADE), places=2)
         self.assertGreater(got[0], o[0])                                    # $100 costs less than $500 on a thin pool
         self.assertEqual(got[1:], o[1:])
-        self.assertEqual(SC.reprice_ledger(st, C.TRADE), 0)                 # once per change of costs
+        self.assertEqual(SC.reprice_ledger(st, C.TRADE, self.EXITS), 0)     # once per change of costs or fills
+        st.close()
+
+    def test_a_take_profit_read_above_its_target_is_filled_at_the_target(self):
+        st = Store(os.path.join(tempfile.mkdtemp(), "t.db"))
+        sid = st.add_sig("r", "A", "A", 0.0, 1.0, 30_000, 1e6, {}, "tp10_8h", False, {})
+        sid2 = st.add_sig("r", "B", "B", 0.0, 2.0, 30_000, 1e6, {}, "tp10_8h", False, {})
+        o = [T.net_ret(1.45, 30_000, 25_000, C.TRADE), 0.5, "target", 1800.0, 1.45, 25_000]
+        o2 = [T.net_ret(1.1, 30_000, 30_000, C.TRADE), 0.5, "target", 1800.0, 2.2, 30_000]     # at its target already
+        st.update_sig(sid, {"tp10_8h": o}, {}, 0, 1.45, 25_000, True, 1800.0)
+        st.update_sig(sid2, {"tp10_8h": o2}, {}, 0, 2.2, 30_000, True, 1800.0)
+        st.commit()
+        SC.reprice_ledger(st, C.TRADE, self.EXITS)
+        a, b = (x["out"]["tp10_8h"] for x in st.sigs())
+        self.assertAlmostEqual(a[4], 1.1)                                    # filled at the target...
+        self.assertEqual(a[6], 1.45)                                         # ...keeping the price read
+        self.assertAlmostEqual(a[0], T.net_ret(1.1, 30_000, 25_000, C.TRADE), places=2)
+        self.assertEqual(len(b), 6)                                          # nothing to change
+        self.assertAlmostEqual(b[0], o2[0], places=2)
         st.close()
 
     def test_the_size_table_prices_the_same_trades_at_each_size(self):

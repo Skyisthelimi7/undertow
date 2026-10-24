@@ -225,6 +225,11 @@ config). Each scan reads prices three ways, in time order: its own reading of ev
 trade at once; one reading a minute while it works out the gates (next section), which steps them again; and, once
 the gates are known, the scan's decisions (a structure gate failed, an exit model says sell), carried out at each
 trade's latest price. A stop fills at the first price read at or past its level, within a minute while a scan runs.
+A take-profit fills at its target, as an order resting at the target would, even when the first price read past it
+was higher (since 24 October 2026, applied to every recorded trade; the price read is kept beside the fill). Booking
+the reading instead had made targets look better than they were: half of the take-profits read more than 2 points
+above +10%, 7% more than 25 points, and in the ones checked against GeckoTerminal's 1-minute candles the biggest
+readings often never traded.
 
 * **Bet size.** The ledger was kept at $500 a trade until 22 October 2026, then at $100, with every recorded result
   priced again from its entry and exit prices. Price impact is the one cost a smaller position shrinks: on a $50k pool
@@ -234,6 +239,13 @@ trade's latest price. A stop fills at the first price read at or past its level,
   The tab's "Bet size and costs" table prices the same closed trades at $25, $100 and $500, overall and by pool
   liquidity. Many small bets make the average more certain; they do not make it positive.
 
+* **Running profit and loss.** Every rule and model carries its paper P/L in dollars since it joined the bench (a
+  redefined rule's since its redefinition): closed trades at their result after costs under the exit each was held
+  to, open trades at their last price after the cost of selling there, at the ledger's $100 a trade. Every trade
+  counts from the moment it opens, so the total leaves nothing out (the fair-counting rule below is for averages).
+  Trades the ledger prunes (after 28 days for the models', 60 for the rules') are carried in the database's
+  `pnl_carry` table first, so the totals keep counting them. The Models tab charts each model's realised P/L as its
+  trades closed, against the median model and the random control.
 * **Live buy signals.** A rule goes live only on its forward record: trades opened after it joined the bench, which it
   was never fitted to. It needs at least 30 matured trades averaging +1% or better after costs with t ≥ 2 (errors
   clustered by coin), in two weekly reviews in a row, and a backtest on the stored path that does not disagree. A live
@@ -345,7 +357,15 @@ that passed every gate at the scan before.
 `undertow/models.py` trains every algorithm in `undertow/zoo.py` plus an LSTM (`undertow/lstm.py`) on three variable
 sets (every variable; every variable except attention; attention and the price path only), so the gap between the
 first two shows what attention adds. The minute data's short-window variables, worked out at every scan from
-21 October 2026, are among "every variable"; a variable with no readings in a training window is left out of it. The algorithms: logistic regression, random forest, extra trees, gradient
+21 October 2026, are among "every variable"; a variable with no readings in a training window is left out of it.
+Four more sets, added on 24 October 2026, take apart the set the best forward record came from: the price path alone,
+attention alone, attention and the price path with the pool's size (market cap, liquidity, liquidity against market
+cap, age, holders), and the price path with the minute data's price and trading variables. They train six
+algorithms each (logistic regression, random forest, LightGBM, the neural network, the LSTM and LightGBM on returns;
+`MODEL_SET_ALGOS`), one of each family, because each extra model adds to the luck any one of them can show and
+fifteen close relatives answer the same question as six: 70 models in all. The same day the minute data's three
+attention readings (trending-score change, boosts in the last 15 minutes, ad impressions) came out of "every
+variable except attention", where they had been since 21 October. The algorithms: logistic regression, random forest, extra trees, gradient
 boosting, XGBoost, LightGBM, k nearest neighbours, naive Bayes, a small neural network, the LSTM over each coin's last 8
 scans, and five models of the trade's return (ridge, random forest, gradient boosting, XGBoost, LightGBM), with a
 random-score control. Exit models (logistic regression, random forest, gradient boosting, LightGBM, neural network)
@@ -496,14 +516,17 @@ the page shows when the last scan ran and warns when one is overdue.
 * **Visitor counts are not public.** Attention comes from stand-ins (trending ranks, paid promotion, followers), and X
   followers come from a free third-party mirror that can lag, fail or disappear; a failed read is marked, not guessed.
 * **Models see a short history.** Days, not months, of one market regime: a model that clears every test can still
-  fail when the market turns, which is why only its forward record can make it live. Testing about 45 models at once
-  means some will look good by luck; the luck line and the forward bar are there for that.
+  fail when the market turns, which is why only its forward record can make it live. Testing about 70 models at once
+  means some will look good by luck: with no edge at all, about one in 44 shows a forward t of 2 or more. The luck
+  line, the forward bar (two reviews in a row) and the random control are there for that.
 * **The weekly review tests many things at once.** Two reviews in a row and 2.5 standard errors cut the false
   alarms, they do not remove them, and four weeks of one market regime is still one regime.
 * **The crowd can be gamed** (sock-puppet accounts, coordinated tags). That is why it never gates, and why calls are
   scored against the base rate rather than counted.
 * **Paper trades are not fills.** The ledger prices a trade at DEX Screener's price, once a minute while a scan runs
-  and at every scan, with a fee allowance and a pool-model price impact. Between scans there is a gap of about two
+  and at every scan, with a fee allowance and a pool-model price impact. A take-profit is booked at its target: a
+  resting order would have sold there, though in a jump straight through the target a fast bot can sell higher, and a
+  reading far past the target is as often a print that never traded. Between scans there is a gap of about two
   minutes with no reading, and coins outside the watch list (240 at most) are priced at scans only. Real fills add slippage on fast moves, priority fees and failed transactions, and a
   public signal can move a thin pool before you act on it. A live rule's record is evidence about the past, not a
   promise about its next trade.

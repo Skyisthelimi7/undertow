@@ -43,10 +43,21 @@ FAMILY = {"logit": "linear", "rf": "tree ensemble (bagging)", "et": "tree ensemb
           "xgb": "boosted trees", "lgbm": "boosted trees", "knn": "instance-based", "nb": "probabilistic",
           "mlp": "neural network", "lstm": "recurrent neural network", "ridge": "linear", "rf_ret": "tree ensemble (bagging)",
           "gb_ret": "boosted trees", "xgb_ret": "boosted trees", "lgbm_ret": "boosted trees", RANDOM_ID: "control"}
-ATT_ALL = set(ATT.KEYS) | {"tgm", "tgr"}                     # attention, Telegram counts included
+ATT_ALL = set(ATT.KEYS) | {"tgm", "tgr"}                     # attention at the scan, Telegram counts included
+ATT_MIN = {"gtr5_d15", "bst_d15", "ad_imp"}                  # attention on the minute data (minute.py)
 PRICE_KEYS = [k for k, _l, _u in TRD.PATH_VARS] + ["c5m", "c1h", "c6h", "c24h", "dd24s"]
+SIZE_KEYS = ["mc", "liq", "liq_pct", "age", "hold"]          # how big, how deep and how old the coin's market is
+MIN_PRICE = ["m1", "m5", "m15", "m30", "up30", "dn30", "v5x", "bs5"]   # price and trading on the minute data
 SEQ_POOL = ["r15", "r30", "ru6", "dd6", "vola", "c1h", "v1h_24", "bs1h", "nf1h_liq", "brd1h", "ss1h", "liqc1h",
             "gtr", "gtr5", "jtr", "bst", "tgg", "xfg"]
+# what the LSTM reads in addition, in the sets about the minute data and the pool's size
+SEQ_EXTRA = {"minute_price": ["m5", "m15", "up30", "dn30", "v5x", "bs5"], "attention_price_size": ["liq", "mc", "liq_pct"]}
+SETS = {"no_attention": lambda k: k not in ATT_ALL and k not in ATT_MIN,
+        "attention_price": lambda k: k in ATT_ALL or k in PRICE_KEYS,
+        "price": lambda k: k in PRICE_KEYS,
+        "attention": lambda k: k in ATT_ALL,
+        "attention_price_size": lambda k: k in ATT_ALL or k in PRICE_KEYS or k in SIZE_KEYS,
+        "minute_price": lambda k: k in PRICE_KEYS or k in MIN_PRICE}
 STATE_KEYS = ["held_h", "ret_now", "peak_ret", "dd_peak", "liq_ratio"]
 # sizes and counts on a log scale, flows on a signed log scale (matters for the linear, distance and neural models)
 LOG_KEYS = {"mc", "liq", "v5m", "v1h", "v6h", "v24h", "hold", "xf", "tgm", "tr1h", "ob24h", "age", "web_age", "devm"}
@@ -54,18 +65,22 @@ SLOG_KEYS = {"nf1h", "nf6h", "nf24h"}
 
 
 def set_keys(name):
-    """The variables a model of this set reads (see config.MODEL_SETS)."""
-    allk = list(TRD.VAR_KEYS)
-    if name == "no_attention":
-        return [k for k in allk if k not in ATT_ALL]
-    if name == "attention_price":
-        return [k for k in allk if k in ATT_ALL or k in PRICE_KEYS]
-    return allk
+    """The variables a model of this set reads (see config.MODEL_SETS); "all" and any set not defined here read
+    every variable."""
+    pick = SETS.get(name)
+    return [k for k in TRD.VAR_KEYS if pick is None or pick(k)]
 
 
 def seq_keys(name):
+    """The variables the LSTM of this set reads at each of its last scans."""
     have = set(set_keys(name))
-    return [k for k in SEQ_POOL if k in have]
+    return [k for k in SEQ_POOL + SEQ_EXTRA.get(name, []) if k in have]
+
+
+def algos_for(set_name, set_algos=None):
+    """The algorithms trained on a variable set: those config.MODEL_SET_ALGOS names for it, else every one."""
+    want = (set_algos or {}).get(set_name)
+    return [a for a in ALGOS if want is None or a[0] in want]
 
 
 def _num(v):
@@ -323,9 +338,10 @@ def leading(fitted, keys, n=5):
 
 
 # ---------------------------------------------------------------- training: everything the Models tab reports
-def train_all(path, pol, cfg_trade, cfg, sets, out_dir, now=None, log=print):
-    """Walk-forward test then final fit of every algorithm on every variable set, and of the exit models. Writes each
-    final model to out_dir and returns the summary (also written as summary.json)."""
+def train_all(path, pol, cfg_trade, cfg, sets, out_dir, now=None, log=print, set_algos=None):
+    """Walk-forward test then final fit of every algorithm on every variable set (set_algos: the algorithms of the sets
+    that train only some, see algos_for), and of the exit models. Writes each final model to out_dir and returns the
+    summary (also written as summary.json)."""
     import warnings
     warnings.filterwarnings("ignore")
     now = now or time.time()
@@ -356,7 +372,7 @@ def train_all(path, pol, cfg_trade, cfg, sets, out_dir, now=None, log=print):
         summary["status"] = "collecting: not enough history yet for one walk-forward fold"
         _write(out_dir, summary)
         return summary
-    n_models = len(ALGOS) * len(sets) + 1
+    n_models = sum(len(algos_for(k, set_algos)) for k in sets) + 1
     te_all = np.concatenate([te for _tr, te in fl])
     base_oos = float(net[te_all].mean())
     summary["base_oos_net"] = base_oos
@@ -422,7 +438,7 @@ def train_all(path, pol, cfg_trade, cfg, sets, out_dir, now=None, log=print):
             S_list.append(a)
             M_list.append(b)
         S, M = np.array(S_list, float), np.array(M_list, float)
-        for slug, _name, kind in ALGOS:
+        for slug, _name, kind in algos_for(set_name, set_algos):
             mid = f"{slug}.{set_name}"
             try:
                 rec = evaluate(mid, slug, kind, set_name, keys if kind != "seq" else sk, X, S, M)

@@ -176,6 +176,30 @@ class Models(unittest.TestCase):
         # an old model trades nothing
         self.assertFalse(MOD.Bank(self.dir, s["trained_at"] + 40 * H, 30).fresh)
 
+    def test_variable_sets_take_the_leading_set_apart(self):
+        ap, pr, at = (set(MOD.set_keys(k)) for k in ("attention_price", "price", "attention"))
+        self.assertEqual(ap, pr | at)                                       # each half of the leading set alone
+        self.assertFalse(pr & at)
+        size = set(MOD.set_keys("attention_price_size"))
+        self.assertEqual(size - ap, {"mc", "liq", "liq_pct", "age", "hold"})
+        mp = set(MOD.set_keys("minute_price"))
+        self.assertEqual(mp - pr, set(MOD.MIN_PRICE))
+        self.assertFalse(set(MOD.set_keys("no_attention")) & (MOD.ATT_ALL | MOD.ATT_MIN))   # no attention at all
+        self.assertEqual(MOD.set_keys("all"), list(T.VAR_KEYS))
+        self.assertIn("m15", MOD.seq_keys("minute_price"))                  # the LSTM reads the minutes too
+        self.assertNotIn("m15", MOD.seq_keys("all"))                        # the first three sets' LSTMs are as they were
+        self.assertIn("liq", MOD.seq_keys("attention_price_size"))
+        for k in C.MODEL_SETS:
+            self.assertTrue(MOD.set_keys(k), k)
+
+    def test_a_set_can_train_some_algorithms_only(self):
+        self.assertEqual([a[0] for a in MOD.algos_for("price", {"price": ("ridge",)})], ["ridge"])
+        self.assertEqual(MOD.algos_for("all", {"price": ("ridge",)}), MOD.ALGOS)
+        path = synthetic_path(n_coins=40, hours=70, signal=1.0)
+        s = MOD.train_all(path, self.pol, C.TRADE, self.cfg, {"all": "every variable", "price": "the price path only"},
+                          self.dir, log=lambda *a: None, set_algos={"price": ("logit",)})
+        self.assertEqual(sorted(m["id"] for m in s["entry"]), ["logit.all", "logit.price", "random", "ridge.all"])
+
     def test_collecting_until_enough_samples(self):
         s = MOD.train_all(synthetic_path(n_coins=3, hours=20), self.pol, C.TRADE, self.cfg, {"all": "x"}, self.dir,
                           log=lambda *a: None)

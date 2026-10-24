@@ -466,9 +466,18 @@ MODELS = {"every_h": 6, "min_samples": 1200, "min_coins": 40, "fold_h": 8, "min_
           # the scan asks for a training run when GitHub has not run the schedule on time (scan.train_request): models
           # older than every_h + 1 hours, a collecting summary older than retry_collecting_h, at most once per ask_every_h
           "retry_collecting_h": 2, "ask_every_h": 1.5}
-# The variable sets every algorithm is trained on, so the page can show what each set adds.
+# The variable sets the algorithms are trained on, so the page can show what each set adds. The last four (24 Oct)
+# take apart the set the best forward record came from (attention and the price path): the price path alone,
+# attention alone, the two with the pool's size, and the price path with the minute data. They train the algorithms
+# in MODEL_SET_ALGOS, one of each family, the LSTM and a return model, rather than all fifteen: each extra model adds
+# to the luck any one of them can show, and fifteen close relatives answer the same question as six.
 MODEL_SETS = {"all": "every variable", "no_attention": "every variable except attention",
-              "attention_price": "attention and the price path only"}
+              "attention_price": "attention and the price path only",
+              "price": "the price path only", "attention": "attention only",
+              "attention_price_size": "attention, the price path and the pool's size",
+              "minute_price": "the price path with the minute data"}
+MODEL_SET_ALGOS = {k: ("logit", "rf", "lgbm", "mlp", "lstm", "lgbm_ret")
+                   for k in ("price", "attention", "attention_price_size", "minute_price")}
 # What the offline study of the algorithms found before the first training run (tools/study/study_ml.py), shown on the
 # Models tab.
 ML_STUDY = {
