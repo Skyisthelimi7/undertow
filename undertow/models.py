@@ -35,14 +35,23 @@ ALGOS = [
     ("ridge", "Ridge regression", "ret"), ("rf_ret", "Random forest (return)", "ret"),
     ("gb_ret", "Gradient boosting (return)", "ret"), ("xgb_ret", "XGBoost (return)", "ret"),
     ("lgbm_ret", "LightGBM (return)", "ret"),
+    # 25 Oct: return twins of the families that had only a win-or-lose version, on squared error so a rug's loss
+    # weighs in full (the Huber and absolute losses above shrink it), and LightGBM on squared error beside its Huber
+    ("lgbm_l2", "LightGBM (return, squared error)", "ret"), ("mlp_ret", "Neural network (return)", "ret"),
+    ("lstm_ret", "LSTM (return, last 8 scans)", "seq_ret"),
 ]
+SEQ_KINDS = ("seq", "seq_ret")                   # models that read each coin's last scans in order
+# win-or-lose models and their return twins on the same variables (the Models tab compares each pair)
+PAIRS = [("logit", "ridge"), ("rf", "rf_ret"), ("gb", "gb_ret"), ("xgb", "xgb_ret"), ("lgbm", "lgbm_ret"),
+         ("lgbm", "lgbm_l2"), ("mlp", "mlp_ret"), ("lstm", "lstm_ret")]
 RANDOM_ID = "random"
 EXIT_ALGOS = [("logit", "Logistic regression"), ("rf", "Random forest"), ("gb", "Gradient boosting"),
               ("lgbm", "LightGBM"), ("mlp", "Neural network (MLP)")]
 FAMILY = {"logit": "linear", "rf": "tree ensemble (bagging)", "et": "tree ensemble (bagging)", "gb": "boosted trees",
           "xgb": "boosted trees", "lgbm": "boosted trees", "knn": "instance-based", "nb": "probabilistic",
           "mlp": "neural network", "lstm": "recurrent neural network", "ridge": "linear", "rf_ret": "tree ensemble (bagging)",
-          "gb_ret": "boosted trees", "xgb_ret": "boosted trees", "lgbm_ret": "boosted trees", RANDOM_ID: "control"}
+          "gb_ret": "boosted trees", "xgb_ret": "boosted trees", "lgbm_ret": "boosted trees", "lgbm_l2": "boosted trees",
+          "mlp_ret": "neural network", "lstm_ret": "recurrent neural network", RANDOM_ID: "control"}
 ATT_ALL = set(ATT.KEYS) | {"tgm", "tgr"}                     # attention at the scan, Telegram counts included
 ATT_MIN = {"gtr5_d15", "bst_d15", "ad_imp"}                  # attention on the minute data (minute.py)
 PRICE_KEYS = [k for k, _l, _u in TRD.PATH_VARS] + ["c5m", "c1h", "c6h", "c24h", "dd24s"]
@@ -281,7 +290,7 @@ def _factory(slug, kind):
         return Z.TABULAR[name]()
     if kind == "ret":
         return {"ridge": Z.ridge, "rf_ret": Z.random_forest_reg, "gb_ret": Z.gradient_boosting_reg,
-                "xgb_ret": Z.xgboost_reg, "lgbm_ret": Z.lightgbm_reg}[slug]()
+                "xgb_ret": Z.xgboost_reg, "lgbm_ret": Z.lightgbm_reg, "lgbm_l2": Z.lightgbm_l2, "mlp_ret": Z.mlp_reg}[slug]()
     if kind == "exit":
         return Z.EXIT[dict(EXIT_ALGOS)[slug]]()
     raise ValueError(kind)
@@ -301,6 +310,8 @@ class Fitted:
     def score(self, X, M=None):
         if self.kind == "seq":
             return self.model.predict_proba(X, M)
+        if self.kind == "seq_ret":
+            return np.asarray(self.model.predict(X, M), float)
         if self.kind == "ret":
             return np.asarray(self.model.predict(self._x(X)), float)
         return np.asarray(self.model.predict_proba(self._x(X))[:, 1], float)
@@ -310,6 +321,10 @@ def fit(slug, kind, X, y, net, S=None, M=None, seed=0):
     if kind == "seq":
         from .lstm import LSTM
         return Fitted("seq", LSTM(S.shape[2], hidden=12, epochs=25, l2=3e-3, seed=seed).fit(S, M, y))
+    if kind == "seq_ret":
+        from .lstm import LSTM
+        return Fitted("seq_ret", LSTM(S.shape[2], hidden=12, epochs=25, l2=3e-3, seed=seed, task="reg")
+                      .fit(S, M, np.clip(net, -60, 60)))
     cols = np.where(~np.isnan(X).all(axis=0))[0]
     mdl = _factory(slug, kind)
     if kind == "ret":
@@ -378,6 +393,19 @@ def train_all(path, pol, cfg_trade, cfg, sets, out_dir, now=None, log=print, set
     summary["base_oos_net"] = base_oos
     summary["base_oos_win"] = float(y[te_all].mean())
 
+    # ---- the rug model first, so each entry model's test picks can be shown with and without its filter
+    rug_y, rug_flags, rug_scored = None, None, None
+    try:
+        keys_all = set_keys("all")
+        rug, rug_flags, rug_scored, rug_y = train_rug(path, samples, matrix([s["f"] for s in samples], keys_all), keys_all,
+                                                      ts, closed, net, mints, cfg, out_dir, log)
+        summary["rug"] = rug
+        if not rug_scored.any():
+            rug_y = rug_flags = rug_scored = None
+    except Exception as e:                           # the rug model failing must not stop the entry models
+        summary["rug"] = {"error": f"{type(e).__name__}: {e}"[:300]}
+        rug_y = rug_flags = rug_scored = None
+
     def evaluate(mid, slug, kind, set_name, keys, X, S, M):
         t0 = time.time()
         oos, pick = np.full(len(samples), np.nan), np.zeros(len(samples), bool)
@@ -389,8 +417,8 @@ def train_all(path, pol, cfg_trade, cfg, sets, out_dir, now=None, log=print, set
             else:
                 fm = fit(slug, kind, X[tr] if X is not None else None, y[tr], net[tr],
                          S[tr] if S is not None else None, M[tr] if M is not None else None)
-                p_te = fm.score(S[te], M[te]) if kind == "seq" else fm.score(X[te])
-                p_tr = fm.score(S[tr], M[tr]) if kind == "seq" else fm.score(X[tr])
+                p_te = fm.score(S[te], M[te]) if kind in SEQ_KINDS else fm.score(X[te])
+                p_tr = fm.score(S[tr], M[tr]) if kind in SEQ_KINDS else fm.score(X[tr])
             oos[te] = p_te
             cut = np.quantile(p_tr, 1 - cfg["top_share"])
             pick[te] = p_te >= cut
@@ -422,6 +450,14 @@ def train_all(path, pol, cfg_trade, cfg, sets, out_dir, now=None, log=print, set
                    pick_med=float(np.median(net[sel])) if sel.any() else None,
                    pick_t=clustered_t(net[sel], mints[sel]) if sel.sum() > 2 else None, base_net=float(net[m].mean()))
         rec["edge"] = rec["pick_net"] - rec["base_net"] if rec["pick_net"] is not None else None
+        # the same picks with the rug filter: those it scored, less the ones it would have kept out
+        if rug_scored is not None and (sel & rug_scored).sum() >= 5:
+            sr = sel & rug_scored
+            kept = sr & ~rug_flags
+            rec.update(pick_rug=float(rug_y[sr].mean()), pick_kept=int(kept.sum()),
+                       pick_kept_net=float(net[kept].mean()) if kept.any() else None,
+                       pick_kept_rug=float(rug_y[kept].mean()) if kept.any() else None,
+                       pick_kept_t=clustered_t(net[kept], mints[kept]) if kept.sum() > 2 else None)
         one, best = luck(net, [te for _tr, te in fl], per_fold, cfg["luck_draws"], n_models)
         rec.update(luck_one=one, luck_best=best,
                    beats_luck=bool(rec["pick_net"] is not None and best is not None and rec["pick_net"] > best))
@@ -441,13 +477,13 @@ def train_all(path, pol, cfg_trade, cfg, sets, out_dir, now=None, log=print, set
         for slug, _name, kind in algos_for(set_name, set_algos):
             mid = f"{slug}.{set_name}"
             try:
-                rec = evaluate(mid, slug, kind, set_name, keys if kind != "seq" else sk, X, S, M)
+                rec = evaluate(mid, slug, kind, set_name, keys if kind not in SEQ_KINDS else sk, X, S, M)
                 t0 = time.time()
                 fm = fit(slug, kind, X, y, net, S, M)
-                tr_scores = fm.score(S, M) if kind == "seq" else fm.score(X)
+                tr_scores = fm.score(S, M) if kind in SEQ_KINDS else fm.score(X)
                 rec["thr"] = float(np.quantile(tr_scores, 1 - cfg["top_share"]))
-                rec["keys"] = sk if kind == "seq" else keys
-                rec["leading"] = leading(fm, keys) if kind != "seq" else []
+                rec["keys"] = sk if kind in SEQ_KINDS else keys
+                rec["leading"] = leading(fm, keys) if kind not in SEQ_KINDS else []
                 rec["file"] = f"{mid}.pkl"
                 with open(os.path.join(out_dir, rec["file"]), "wb") as fh:
                     pickle.dump(fm, fh, protocol=pickle.HIGHEST_PROTOCOL)
@@ -470,6 +506,86 @@ def train_all(path, pol, cfg_trade, cfg, sets, out_dir, now=None, log=print, set
     summary["status"] = "ok"
     _write(out_dir, summary)
     return summary
+
+
+def rug_labels(path, samples, hours, frac):
+    """1 where the coin's liquidity read below `frac` of the sample reading's at some scan within `hours`, else 0: the
+    pool was pulled, or the price collapsed far enough to take half its value with it."""
+    out = []
+    for s in samples:
+        rows = path[s["mint"]]
+        t0, l0 = rows[s["i"]][0], rows[s["i"]][3]
+        lab = 0
+        if l0:
+            for j in range(s["i"] + 1, len(rows)):
+                tj, lj = rows[j][0], rows[j][3]
+                if tj - t0 > hours * H:
+                    break
+                if lj is not None and lj < frac * l0:
+                    lab = 1
+                    break
+        out.append(lab)
+    return np.array(out, int)
+
+
+def fit_rug(X, y):
+    """The rug model's random forest (the entry models' own settings: shallow trees, large leaves, balanced classes)."""
+    from . import zoo as Z
+    cols = np.where(~np.isnan(X).all(axis=0))[0]
+    mdl = Z.random_forest()
+    mdl.fit(X[:, cols], y)
+    return Fitted("cls", mdl, cols)
+
+
+def train_rug(path, samples, X, keys, ts, closed, net, mints, cfg, out_dir, log):
+    """The rug model: a random forest on every variable, scoring how likely a coin passing every gate is to lose half
+    its liquidity within rug_h hours. Walk-forward on the entry models' test windows, each fold trained only on samples
+    whose label window had closed before the window opened; it keeps a coin out when its score is in the top rug_share
+    of what its own training data scored. Returns (summary record, flags, scored, labels): flags marks the test samples
+    it would have kept out, scored the ones it scored."""
+    y = rug_labels(path, samples, cfg["rug_h"], cfg["rug_liq"])
+    n = len(samples)
+    flags, scored, oos = np.zeros(n, bool), np.zeros(n, bool), np.full(n, np.nan)
+    label = f"liquidity below {cfg['rug_liq']:.0%} of the reading's within {cfg['rug_h']:g} hours"
+    if y.sum() < 20:
+        log(f"rug model: collecting, {int(y.sum())} rugs in the history so far")
+        return {"status": f"collecting: {int(y.sum())} rugs in the history so far", "label": label}, flags, scored, y
+    t0 = time.time()
+    tr_auc = []
+    for tr, te in folds(ts, np.maximum(closed, ts + cfg["rug_h"] * H), cfg):
+        if y[tr].sum() < 5:
+            continue
+        fm = fit_rug(X[tr], y[tr])
+        p_tr, p_te = fm.score(X[tr]), fm.score(X[te])
+        oos[te], scored[te] = p_te, True
+        flags[te] = p_te >= np.quantile(p_tr, 1 - cfg["rug_share"])
+        a = auc(y[tr], p_tr)
+        if a is not None:
+            tr_auc.append(a)
+    rec = {"slug": "rf", "algo": "Random forest", "label": label, "share": cfg["rug_share"], "hours": cfg["rug_h"],
+           "samples": n, "rugs": int(y.sum()), "base": float(y.mean()), "n_vars": len(keys), "status": "ok"}
+    if scored.sum() >= 50 and len(set(y[scored].tolist())) > 1:
+        from sklearn.metrics import average_precision_score
+        ys, ps, fs, ns = y[scored], oos[scored], flags[scored], net[scored]
+        dec = np.quantile(ps, np.linspace(0, 1, 11))
+        rec.update(n_test=int(scored.sum()), rugs_test=int(ys.sum()), base_test=float(ys.mean()), auc=auc(ys, ps),
+                   ap=float(average_precision_score(ys, ps)), train_auc=float(np.mean(tr_auc)) if tr_auc else None,
+                   flag_share=float(fs.mean()), caught=float(fs[ys == 1].mean()) if ys.any() else None,
+                   rate_flagged=float(ys[fs].mean()) if fs.any() else None, rate_kept=float(ys[~fs].mean()) if (~fs).any() else None,
+                   net_flagged=float(ns[fs].mean()) if fs.any() else None, net_kept=float(ns[~fs].mean()) if (~fs).any() else None,
+                   net_all=float(ns.mean()), kept_t=clustered_t(ns[~fs], mints[scored][~fs]) if (~fs).sum() > 2 else None,
+                   deciles=[{"rug": float(ys[(ps >= dec[k]) & (ps <= dec[k + 1])].mean()),
+                             "net": float(ns[(ps >= dec[k]) & (ps <= dec[k + 1])].mean())} for k in range(10)])
+        rec["gap"] = rec["train_auc"] - rec["auc"] if rec.get("train_auc") is not None and rec.get("auc") is not None else None
+    fm = fit_rug(X, y)
+    rec["thr"] = float(np.quantile(fm.score(X), 1 - cfg["rug_share"]))
+    rec.update(keys=keys, leading=leading(fm, keys), file="rug.pkl", seconds=round(time.time() - t0, 1))
+    with open(os.path.join(out_dir, rec["file"]), "wb") as fh:
+        pickle.dump(fm, fh, protocol=pickle.HIGHEST_PROTOCOL)
+    log(f"rug model: {rec['rugs']} rugs in {n} samples ({rec['base']:.1%}); test AUC {rec.get('auc') or 0:.3f}, keeps out "
+        f"{rec.get('flag_share') or 0:.0%} of test readings and {rec.get('caught') or 0:.0%} of their rugs; after costs "
+        f"kept {rec.get('net_kept') or 0:+.2f}% vs kept out {rec.get('net_flagged') or 0:+.2f}%")
+    return rec, flags, scored, y
 
 
 def train_exits(path, samples, pol, cfg_trade, cfg, fl, out_dir, log):
@@ -639,6 +755,12 @@ class Bank:
         for e in self.summary.get("exit") or []:
             if e.get("file"):
                 self._load(d, e, self.exit)
+        self.rug = None
+        rug = self.summary.get("rug") or {}
+        if rug.get("file") and rug.get("thr") is not None:
+            box = {}
+            self._load(d, {**rug, "id": "rug"}, box)
+            self.rug = box.get("rug")
 
     def _load(self, d, meta, into):
         try:
@@ -656,7 +778,7 @@ class Bank:
         steps = (self.summary.get("cfg") or {}).get("seq_steps") or 8
         for mid, (meta, fm) in self.entry.items():
             try:
-                if meta["kind"] == "seq":
+                if meta["kind"] in SEQ_KINDS:
                     S, M = [], []
                     for mt in mints:
                         rows, i = seqs.get(mt, ([], -1))
@@ -673,6 +795,19 @@ class Bank:
             except Exception as e:
                 self.errors.append(f"{mid}: {type(e).__name__}")
         return out
+
+    def rug_scores(self, feats):
+        """{mint: (score, kept out)} from the rug model for the given coins' variables; {} without a fresh rug model."""
+        if not self.rug or not self.fresh or not feats:
+            return {}
+        meta, fm = self.rug
+        mints = list(feats)
+        try:
+            p = fm.score(matrix([feats[mt] for mt in mints], meta["keys"]))
+        except Exception as e:
+            self.errors.append(f"rug: {type(e).__name__}")
+            return {}
+        return {mt: (float(v), bool(v >= meta["thr"])) for mt, v in zip(mints, p)}
 
     def fired(self, scores, feats, now, share):
         """{model id: {mint: score}} for the coins each model would buy: a score at or above its threshold (and the

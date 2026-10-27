@@ -428,6 +428,49 @@ class RunningPnL(unittest.TestCase):
         # $500 a trade scales the dollars
         self.assertAlmostEqual(SC.pnl_by_rule(sigs, [], {}, rules, {**cfg, "usd": 500}, 14 * H)["rules"]["m:a"]["real"], 20.0)
 
+    def test_pulled_pools_and_the_rug_filters_split(self):
+        cfg = {**C.TRADE, "usd": 100}
+        rules = {"m:a": {"id": "m:a", "added": 0, "model": "a"}, "m:random": {"id": "m:random", "added": 0, "model": "random"},
+                 "r": {"id": "r", "added": 0}}
+        def sig(rule, out=None, last=None, hi=None):
+            s = self.sig(rule, "X", 1 * H, out, last)
+            if hi is not None:
+                s["f"] = {"rug": 0.5, "rug_hi": hi}
+            return s
+        sigs = [sig("m:a", [-80.0, 2.0, "liquidity pulled", 3 * H, 0.2], hi=1),
+                sig("m:a", [7.0, 1.0, "target", 2 * H, 1.1], hi=0),
+                sig("m:a", [-5.0, 8.0, "time", 9 * H, 0.95], hi=0),
+                sig("m:a", last=1.0, hi=0),
+                sig("m:a", [-70.0, 1.0, "liquidity pulled", 2 * H, 0.3]),          # before the filter ran: no call
+                sig("m:random", [-60.0, 1.0, "liquidity pulled", 2 * H, 0.4], hi=1),
+                sig("r", [3.0, 1.0, "time", 9 * H, 1.04], hi=0)]
+        got = SC.pnl_by_rule(sigs, [], {}, rules, cfg, 10 * H)["rules"]
+        a = got["m:a"]
+        self.assertEqual((a["pulled"], a["pulled_usd"]), (2, -150.0))
+        f = a["filt"]
+        self.assertEqual((f["out"]["n"], f["out"]["pulled"], f["out"]["total"]), (1, 1, -80.0))
+        self.assertEqual((f["kept"]["n"], f["kept"]["n_open"], f["kept"]["pulled"]), (2, 1, 0))
+        self.assertAlmostEqual(f["kept"]["total"], round(2.0 + T.net_ret(1.0, 1e9, 1e9, cfg), 2))
+        g = SC.filter_groups(got, rules)
+        self.assertEqual(set(g), {"models", "random", "rules"})
+        self.assertEqual(g["random"]["out"]["n"], 1)
+        self.assertEqual(g["models"]["out"]["total"], -80.0)                     # the random control is kept apart
+
+    def test_a_pair_is_compared_over_the_hours_both_were_trading(self):
+        cfg = {**C.TRADE, "usd": 100}
+        rules = {"m:lgbm.all": {"id": "m:lgbm.all", "added": 0}, "m:lgbm_l2.all": {"id": "m:lgbm_l2.all", "added": 5 * H},
+                 "m:rf.all": {"id": "m:rf.all", "added": 0}}
+        by_rule = {"m:lgbm.all": [self.sig("m:lgbm.all", "A", 1 * H, [-80.0, 1.0, "liquidity pulled", 2 * H, 0.2]),   # before its twin
+                                  self.sig("m:lgbm.all", "B", 6 * H, [7.0, 1.0, "target", 7 * H, 1.1])],
+                   "m:lgbm_l2.all": [self.sig("m:lgbm_l2.all", "B", 6 * H, [-5.0, 8.0, "time", 14 * H, 0.95]),
+                                     self.sig("m:lgbm_l2.all", "C", 7 * H, last=1.0)]}
+        got = SC.pair_records(by_rule, rules, {"lgbm.all", "lgbm_l2.all", "rf.all"}, [("lgbm", "lgbm_l2"), ("rf", "rf_ret")], cfg, 20 * H)
+        self.assertEqual(len(got), 1)                                       # rf has no twin on the bench
+        q = got[0]
+        self.assertEqual((q["set"], q["a"], q["b"], q["since"]), ("all", "lgbm", "lgbm_l2", 5 * H))
+        self.assertEqual((q["a_pnl"]["total"], q["a_pnl"]["n"], q["a_pnl"]["pulled"]), (7.0, 1, 0))   # the earlier rug is left out
+        self.assertEqual((q["b_pnl"]["n"], q["b_pnl"]["n_open"]), (1, 1))
+
     def test_pruned_trades_are_carried(self):
         st = Store(os.path.join(tempfile.mkdtemp(), "t.db"))
         for i, ret in enumerate((5.0, -3.0, 7.0)):

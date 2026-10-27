@@ -391,7 +391,34 @@ learn whether selling an open trade now beats holding on to the live exit.
   above its threshold, and every entry is logged with the coin and its UTC time. Model rules sit on the Buy & sell bench
   and face the same bar as any rule (30 matured trades averaging +1% after costs with t ≥ 2, two reviews in a row).
   Exit models are exit policies on the same bench, compared with the live exit on the same trades. A model trained more
-  than 30 hours ago opens no trades.
+  than 30 hours ago opens no trades. With 99 models the models' settled trades are kept 14 days, so a model's forward
+  record covers its last 14 days; its profit and loss since it started still counts the pruned ones.
+
+**Two tests on what sinks the models (27 October 2026).** By 25 October the models found more winners than the
+random control (65% of their closed trades reached +10%, against 55%) yet lost more: the 6% of their trades whose
+pool was pulled cost $80 each, and the 29% that ran out the 8 hours $22 each.
+
+* **The rug filter** (`train_rug`): a random forest on every variable, trained with the entry models on the same
+  samples, scores how likely a coin passing every gate is to lose half its liquidity within 8 hours (a pulled pool, or
+  a collapse that takes half its value with it). It is tested walk-forward on the entry models' test windows, each fold
+  trained only on readings whose 8 hours had passed, and its filter keeps a coin out when its score is in the top 15%
+  of what its training data scored (`MODELS["rug_share"]`). On the path to 27 October (9,167 readings on 436 coins, 295
+  pulled) it scored AUC 0.954 out of sample, 0.948 with every test coin unseen in training; it kept out 16% of readings
+  and 93% of their rugs, and the readings it kept averaged -4.1% a trade after costs against -16.5% for those it kept
+  out and -6.1% for all. Age alone scores 0.94: most of what it knows is that a coin a few hours old is the one likely
+  to collapse. The scan scores every coin passing every gate and records the score and the filter's call on every
+  paper trade, from every rule and model, so each one's record with the filter is its own trades without the ones the
+  filter would have kept out. The Models tab shows the walk-forward test, every model's test picks with the filter,
+  and the forward split of every model's and rule's trades into kept and kept out.
+* **Win-or-lose against return** (`PAIRS`): every win-or-lose model has a twin trained on the trade's return itself, on
+  the same variables and samples: logistic regression against ridge regression, the random forest, gradient
+  boosting, XGBoost and LightGBM against their return versions, and since 27 October the neural network and the LSTM
+  against new return versions, with a second LightGBM on returns fitted on squared error. A win-or-lose label counts a
+  -80% rug as one more loss; a return label counts it as -60% (returns are capped there), and the squared-error fits
+  (ridge, the random forest, the neural network, the LSTM, the second LightGBM) weigh it in full where the Huber and
+  absolute losses of the other boosted trees shrink it. The four newer variable sets gained the twins of their five
+  win-or-lose models. The Models tab compares each pair out of sample and forward, over the hours both were trading:
+  99 models in all.
 
 **What the candle study found first** (`tools/study/study_ml.py`, 7,476 sample entries on 419 coins, 18-20 October
 2026): the trees ranked winners above losers out of sample (random forest AUC 0.673, boosted trees about 0.667,
@@ -518,9 +545,12 @@ the page shows when the last scan ran and warns when one is overdue.
 * **Visitor counts are not public.** Attention comes from stand-ins (trending ranks, paid promotion, followers), and X
   followers come from a free third-party mirror that can lag, fail or disappear; a failed read is marked, not guessed.
 * **Models see a short history.** Days, not months, of one market regime: a model that clears every test can still
-  fail when the market turns, which is why only its forward record can make it live. Testing about 70 models at once
+  fail when the market turns, which is why only its forward record can make it live. Testing 99 models at once
   means some will look good by luck: with no edge at all, about one in 44 shows a forward t of 2 or more. The luck
   line, the forward bar (two reviews in a row) and the random control are there for that.
+* **The rug filter is judged on paper.** Its call is recorded on every trade rather than acted on, so a model's
+  record with the filter is its trades less the ones it would have kept out; a model run with the filter could have
+  bought another coin in their place, or the same coin later, which the record does not show.
 * **The weekly review tests many things at once.** Two reviews in a row and 2.5 standard errors cut the false
   alarms, they do not remove them, and four weeks of one market regime is still one regime.
 * **The crowd can be gamed** (sock-puppet accounts, coordinated tags). That is why it never gates, and why calls are

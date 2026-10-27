@@ -1,6 +1,7 @@
-"""A small LSTM classifier in numpy: one recurrent layer over a short sequence of scans, then a logistic output.
-Trained by backpropagation through time with Adam, L2 weight decay and early stopping on a later slice of the data,
-so it needs nothing beyond numpy and its weights can be saved as plain lists.
+"""A small LSTM in numpy: one recurrent layer over a short sequence of scans, then a logistic output (task "cls",
+whether the trade wins) or a linear one (task "reg", the trade's return, on squared error). Trained by
+backpropagation through time with Adam, L2 weight decay and early stopping on a later slice of the data, so it needs
+nothing beyond numpy and its weights can be saved as plain lists.
 
 Shapes: X (batch, steps, features) with missing readings already filled; M (batch, steps) is 1 for a real reading and
 0 for padding, and a padded step leaves the state unchanged."""
@@ -13,8 +14,9 @@ def _sig(z):
 
 
 class LSTM:
-    def __init__(self, n_in, hidden=16, l2=1e-3, lr=5e-3, epochs=40, batch=256, patience=5, seed=0):
+    def __init__(self, n_in, hidden=16, l2=1e-3, lr=5e-3, epochs=40, batch=256, patience=5, seed=0, task="cls"):
         self.n_in, self.h, self.l2, self.lr, self.epochs, self.batch, self.patience = n_in, hidden, l2, lr, epochs, batch, patience
+        self.task, self.ymu, self.ysd = task, 0.0, 1.0
         rng = np.random.default_rng(seed)
         H = hidden
         self.p = {"Wx": rng.normal(0, 1 / np.sqrt(n_in), (n_in, 4 * H)), "Wh": rng.normal(0, 1 / np.sqrt(H), (H, 4 * H)),
@@ -47,12 +49,17 @@ class LSTM:
         B = X.shape[0]
         H = self.h
         logit, hT, cache = self._forward(X, M, keep=True)
-        p = _sig(logit)
-        eps = 1e-9
-        loss = -np.sum(wt * (y * np.log(p + eps) + (1 - y) * np.log(1 - p + eps))) / B
+        if getattr(self, "task", "cls") == "reg":          # half the squared error of the scaled return
+            err = logit - y
+            loss = 0.5 * np.sum(wt * err ** 2) / B
+            dlogit = wt * err / B
+        else:
+            p = _sig(logit)
+            eps = 1e-9
+            loss = -np.sum(wt * (y * np.log(p + eps) + (1 - y) * np.log(1 - p + eps))) / B
+            dlogit = wt * (p - y) / B
         loss += 0.5 * self.l2 * sum(np.sum(self.p[k] ** 2) for k in ("Wx", "Wh", "w"))
         g = {k: np.zeros_like(v) for k, v in self.p.items()}
-        dlogit = wt * (p - y) / B
         g["w"] = hT.T @ dlogit
         g["c"] = np.array([dlogit.sum()])
         dh = dlogit[:, None] * self.p["w"][None, :]
@@ -87,10 +94,16 @@ class LSTM:
         Xs = self._scale(X) * M[:, :, None]
         n = len(y)
         cut = max(1, int(n * (1 - val)))
+        if getattr(self, "task", "cls") == "reg":          # the return, scaled on the training slice; every sample alike
+            self.ymu = float(np.mean(y[:cut]))
+            self.ysd = float(np.std(y[:cut])) or 1.0
+            y = (y - self.ymu) / self.ysd
+            weight = lambda yy: np.ones_like(yy)
         Xt, Mt, yt, Xv, Mv, yv = Xs[:cut], M[:cut], y[:cut], Xs[cut:], M[cut:], y[cut:]
-        pos = yt.mean() if len(yt) else 0.5
-        wpos, wneg = (0.5 / pos if 0 < pos < 1 else 1.0), (0.5 / (1 - pos) if 0 < pos < 1 else 1.0)
-        weight = lambda yy: np.where(yy > 0.5, wpos, wneg)
+        if getattr(self, "task", "cls") != "reg":          # the classes weighted equally
+            pos = yt.mean() if len(yt) else 0.5
+            wpos, wneg = (0.5 / pos if 0 < pos < 1 else 1.0), (0.5 / (1 - pos) if 0 < pos < 1 else 1.0)
+            weight = lambda yy: np.where(yy > 0.5, wpos, wneg)
         rng = np.random.default_rng(seed)
         mom = {k: np.zeros_like(v) for k, v in self.p.items()}
         vel = {k: np.zeros_like(v) for k, v in self.p.items()}
@@ -121,16 +134,23 @@ class LSTM:
         Xs = self._scale(np.asarray(X, float)) * np.asarray(M, float)[:, :, None]
         return _sig(self._forward(Xs, np.asarray(M, float))[0])
 
+    def predict(self, X, M):
+        """The predicted return (task "reg"), in the units it was trained on."""
+        Xs = self._scale(np.asarray(X, float)) * np.asarray(M, float)[:, :, None]
+        return self._forward(Xs, np.asarray(M, float))[0] * getattr(self, "ysd", 1.0) + getattr(self, "ymu", 0.0)
+
     # ---------------------------------------------------------------- saving
     def to_dict(self):
         return {"n_in": self.n_in, "h": self.h, "p": {k: v.tolist() for k, v in self.p.items()},
-                "mu": self.mu.tolist(), "sd": self.sd.tolist(), "history": self.history}
+                "mu": self.mu.tolist(), "sd": self.sd.tolist(), "history": self.history,
+                "task": getattr(self, "task", "cls"), "ymu": getattr(self, "ymu", 0.0), "ysd": getattr(self, "ysd", 1.0)}
 
     @classmethod
     def from_dict(cls, d):
-        m = cls(d["n_in"], d["h"])
+        m = cls(d["n_in"], d["h"], task=d.get("task", "cls"))
         m.p = {k: np.asarray(v, float) for k, v in d["p"].items()}
         m.mu, m.sd, m.history = np.asarray(d["mu"], float), np.asarray(d["sd"], float), d.get("history", [])
+        m.ymu, m.ysd = d.get("ymu", 0.0), d.get("ysd", 1.0)
         return m
 
     def dumps(self):

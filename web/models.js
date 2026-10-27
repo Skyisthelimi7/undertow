@@ -28,7 +28,14 @@ function setLabel(s){return (((M&&M.sets)||{})[s])||(s==='none'?'no variables':s
 function varLabel(k){var L=((D.lab||{}).variables||[]).filter(function(v){return v.key===k;})[0]||((D.trade||{}).vars||[]).filter(function(v){return v.key===k;})[0];
   var S={held_h:'Hours held',ret_now:'Return so far',peak_ret:'Peak return so far',dd_peak:'Fall from the peak',liq_ratio:'Liquidity vs entry'};return (L&&L.label)||S[k]||k;}
 function lead(l){return (l||[]).slice(0,3).map(function(x){return esc(varLabel(x[0]))+' <span class="ip">'+Math.round(x[1]*100)+'%</span>';}).join('<br>')||'<span class="ip">–</span>';}
-function kindName(k){return k==='ret'?'return model':(k==='seq'?'sequence model':(k==='random'?'control':'classifier'));}
+function kindName(k){return k==='ret'?'return model':(k==='seq'?'sequence model':(k==='seq_ret'?'sequence return model':(k==='random'?'control':'classifier')));}
+var KINDS={cls:['cls','seq'],ret:['ret','seq_ret'],seq:['seq','seq_ret']};
+function kindOk(m){return st.kind==='all'||m.id==='random'||(KINDS[st.kind]||[st.kind]).indexOf(m.kind)>=0;}
+function isRet(k){return k==='ret'||k==='seq_ret';}
+function share(v,d){return v==null||isNaN(v)?'–':pc(v*100,d!=null?d:(v<0.1?1:0));}
+/* the rug filter's split of a model's (or a group's) trades since it ran: kept and kept out */
+function filtCell(f){if(!f)return '<span class="nm">no trades scored yet</span>';var k=f.kept||{},o=f.out||{},nk=(k.n||0)+(k.n_open||0),no=(o.n||0)+(o.n_open||0);
+  return '<span class="'+((k.total||0)>0?'tr-up':'tr-dn')+'">'+dol(k.total)+'</span><span class="nm">kept '+int(nk)+(nk?' ('+dol(k.total/nk)+' a trade)':'')+' · kept out '+int(no)+(no?' '+dol(o.total):'')+'</span>';}
 function dol(v){return v==null||isNaN(v)?'–':(v>0?'+':'')+usd(v);}
 function hasP(m){return m&&m.pnl&&(m.pnl.n||m.pnl.n_open);}
 function pnlCell(p){if(!p||!(p.n||p.n_open))return '<span class="nm">no trades yet</span>';
@@ -62,13 +69,14 @@ function entrySec(){
       :esc(M.status||'Waiting for the first training run')+'.';
     return sec('Entry models','<p class="empty">'+msg+'</p>','md-entry');}
   var sets=[];E.forEach(function(m){if(m.set&&m.set!=='none'&&sets.indexOf(m.set)<0)sets.push(m.set);});
-  E=E.filter(function(m){return (st.set==='*'||m.set===st.set||m.id==='random')&&(st.kind==='all'||m.kind===st.kind||m.id==='random');});
+  E=E.filter(function(m){return (st.set==='*'||m.set===st.set||m.id==='random')&&kindOk(m);});
   var sk=function(m){var v=st.sort==='fwd'?((m.fwd||{}).n?(m.fwd||{}).mean:null):(st.sort==='pnl'?(hasP(m)?m.pnl.total:null):m[st.sort]);return v==null?-1e9:v;};
   E.sort(function(a,b){return (b.error?-1:0)-(a.error?-1:0)||sk(b)-sk(a);});
   var rows=E.map(function(m){
-    if(m.error)return '<tr><td class="l"><b>'+esc(m.algo)+'</b><br><span class="nm">'+esc(m.family||'')+'</span></td><td class="l">'+esc(setLabel(m.set))+'</td><td class="l" colspan="20"><span class="tr-dn">Failed to train: '+esc(m.error)+'</span></td></tr>';
+    if(m.error)return '<tr><td class="l"><b>'+esc(m.algo)+'</b><br><span class="nm">'+esc(m.family||'')+'</span></td><td class="l">'+esc(setLabel(m.set))+'</td><td class="l" colspan="23"><span class="tr-dn">Failed to train: '+esc(m.error)+'</span></td></tr>';
     var f=m.fwd||{},le=m.last_entry,gapCls=m.gap!=null&&m.gap>0.15?' class="tr-dn"':'';
-    var aucCell=m.kind==='ret'?f3(m.auc)+'<span class="nm">rank IC '+f2(m.ic)+'</span>':f3(m.auc)+(m.auc_sd!=null?'<span class="nm">± '+f3(m.auc_sd)+'</span>':'');
+    var aucCell=isRet(m.kind)?f3(m.auc)+'<span class="nm">rank IC '+f2(m.ic)+'</span>':f3(m.auc)+(m.auc_sd!=null?'<span class="nm">± '+f3(m.auc_sd)+'</span>':'');
+    var rugCell=m.pick_kept!=null?'<span class="'+(m.pick_kept_net>0?'tr-up':'tr-dn')+'">'+n2(m.pick_kept_net)+'</span>'+tval(m.pick_kept_t)+'<span class="nm">'+int(m.pick_kept)+' of '+int(m.picks||0)+' picks kept · rugs '+share(m.pick_rug)+' → '+share(m.pick_kept_rug)+'</span>':'<span class="nm">–</span>';
     return '<tr'+(m.id==='random'?' class="holdrow"':'')+'><td class="l"><b>'+esc(m.algo)+'</b><br><span class="nm">'+esc(m.family||'')+' · '+esc(kindName(m.kind))+'</span></td>'
       +'<td class="l">'+esc(setLabel(m.set))+'<br><span class="nm">'+int(m.n_vars||0)+' variables</span></td>'
       +'<td class="l">'+stChip(m.status)+(m.status?'<br>'+vchip(m.verdict):'')+'</td>'
@@ -76,21 +84,21 @@ function entrySec(){
       +'<td>'+(m.accuracy==null?'–':pc(m.accuracy*100,1))+'</td><td>'+(m.balanced_acc==null?'–':pc(m.balanced_acc*100,1))+'</td>'
       +'<td>'+(m.brier==null?'–':f3(m.brier)+'<span class="nm">log loss '+f3(m.logloss)+'</span>')+'</td>'
       +'<td>'+int(m.picks||0)+'<span class="nm">'+int(m.pick_coins||0)+' coins</span></td><td>'+(m.pick_win==null?'–':pc(m.pick_win*100,0))+'</td>'
-      +'<td class="'+(m.pick_net>0?'tr-up':'tr-dn')+'">'+n2(m.pick_net)+tval(m.pick_t)+'</td><td>'+n2(m.base_net)+'</td>'
+      +'<td class="'+(m.pick_net>0?'tr-up':'tr-dn')+'">'+n2(m.pick_net)+tval(m.pick_t)+'</td><td>'+rugCell+'</td><td>'+n2(m.base_net)+'</td>'
       +'<td>'+(m.edge==null?'–':(m.edge<0?MINUS:'+')+Math.abs(m.edge).toFixed(2)+' pts')+'</td>'
       +'<td>'+n2(m.luck_best)+'<span class="nm">one draw '+n2(m.luck_one)+'</span></td><td>'+(m.beats_luck?'<span class="vchip works">Yes</span>':'<span class="vchip none">No</span>')+'</td>'
       +'<td class="l lean">'+lead(m.leading)+'</td>'
       +'<td>'+int(m.trades||0)+(m.open?'<span class="nm">'+int(m.open)+' open</span>':'')+'</td>'
       +'<td>'+(f.n?pc(f.win*100,0)+' won':'–')+'</td><td class="'+(f.n?(f.mean>0?'tr-up':'tr-dn'):'')+'">'+(f.n?n1(f.mean)+tval(f.t):'–')+'</td>'
-      +'<td>'+pnlCell(m.pnl)+'</td>'
+      +'<td>'+pnlCell(m.pnl)+'</td><td>'+filtCell((m.pnl||{}).filt)+'</td>'
       +'<td class="l lean">'+(le?coin(le.mint,le.sym)+'<br><span class="nm">'+esc(utc(le.ts))+'</span>':'<span class="nm">none yet</span>')+'</td>'
       +'<td>'+int(m.now||0)+'</td></tr>';});
   var seg=function(kind,opts){return '<div class="seg" role="group">'+opts.map(function(o){return '<button type="button" data-m'+kind+'="'+o[0]+'" aria-pressed="'+(st[kind]===o[0])+'">'+esc(o[1])+'</button>';}).join('')+'</div>';};
   var ctl='<div class="md-ctl">'+seg('set',[['*','All variable sets']].concat(sets.map(function(s){return [s,setLabel(s)];})))
-    +seg('kind',[['all','All kinds'],['cls','Classifiers'],['ret','Return models'],['seq','LSTM']])
+    +seg('kind',[['all','All kinds'],['cls','Win-or-lose'],['ret','Return'],['seq','LSTM']])
     +seg('sort',[['pick_net','Sort: out-of-sample picks'],['auc','AUC'],['edge','Edge'],['fwd','Forward record'],['pnl','Paper P/L']])+'</div>';
   var body='<p class="trk-note">Trained only on real data: this scanner’s own readings of real coins and what their prices did next; nothing simulated or made up. Label: '+esc(((M.label||{}).text)||'the paper trade made money after costs')+'. One sample per coin per hour (its first reading that hour while passing every gate), '+int(M.samples||0)+' in all, '+int(M.folds||0)+' walk-forward folds. All test samples averaged <b>'+n2(M.base_oos_net)+'</b> after costs; a model is useful only if its picks beat that, beat the luck line, and clear costs.</p>'
-    +ctl+table(['Algorithm','<Variables','<Status','AUC (test)','AUC (training)','Overfit gap','Accuracy','Balanced accuracy','Brier','Picks (test)','Picks won','Picks: average after costs','All test samples','Edge','Luck line (best of '+int((M.entry||[]).length)+')','Beats luck','<Leans on','Forward trades','Forward won','Forward average','Paper P/L since it started','<Last entry','Picks now'],rows,'wide cards')
+    +ctl+table(['Algorithm','<Variables','<Status','AUC (test)','AUC (training)','Overfit gap','Accuracy','Balanced accuracy','Brier','Picks (test)','Picks won','Picks: average after costs','With the rug filter','All test samples','Edge','Luck line (best of '+int((M.entry||[]).length)+')','Beats luck','<Leans on','Forward trades','Forward won','Forward average','Paper P/L since it started','P/L with the rug filter','<Last entry','Picks now'],rows,'wide cards')
     +'<p class="fine"><b>AUC</b>: how well the scores rank winners above losers on data the model never saw (0.5 is chance). <b>Overfit gap</b>: training AUC minus test AUC; red above 0.15, where a model has learned its training coins rather than the market. <b>Accuracy</b> calls a trade a winner at a probability of 0.5 or more (for return models, a predicted return above zero). <b>Picks</b>: the test samples that scored in the top '+pc((c.top_share||0.2)*100,0)+' of the scores the model gave its own training data, the trades it would have made. <b>Luck line</b>: the 95th percentile of what the luckiest of '+int((M.entry||[]).length)+' random pickers would have averaged with the same number of picks in each fold; beating it means a model did better than luck alone would let the best of this many models look. t: errors clustered by coin. <b>Leans on</b>: the variables with the largest share of the model’s importance (trees) or weight (linear), where the library reports it.</p>';
   return sec('Entry models: when to buy',body,'md-entry');
 }
@@ -143,6 +151,56 @@ function pnlSec(){
   return sec('Paper profit and loss since each model started',body,'md-pnl');
 }
 
+/* test 1: the rug model, walk-forward and forward */
+function rugSec(){
+  var R=M.rug,G=M.rug_groups||{};if(!R)return '';
+  if(R.error)return sec('Rug filter','<p class="empty tr-dn">The rug model failed to train: '+esc(R.error)+'</p>','md-rug');
+  if(R.status!=='ok')return sec('Rug filter','<p class="empty">'+esc(R.status||'Waiting for the next training run')+'.</p>','md-rug');
+  var c=M.cfg||{},sh=R.share||0.15;
+  var body='<p class="trk-note">A random forest on every variable, trained with the entry models on the same samples, scores how likely a coin that passes every gate is to have its pool pulled: '+esc(R.label||'')+' (a pulled pool, or a collapse that takes half its value with it). Its filter keeps a coin out when the score is in the top '+pc(sh*100,0)+' of what its own training data scored. Walk-forward, each fold trained only on readings whose 8 hours had passed before the test window opened. It mostly reads a coin’s age: one a few hours old is the one likely to collapse. Nothing is kept out of the records: every model and rule still trades as before, its score is recorded on every trade, and each model’s trades the filter would have let through form its record with the filter, the same trades without the ones it would have kept out.</p>';
+  body+='<div class="kpis">'+kpi('Rugs in the history',int(R.rugs||0),share(R.base,1)+' of '+int(R.samples||0)+' readings')
+    +kpi('AUC (test)',f3(R.auc),'training '+f3(R.train_auc)+' · average precision '+f3(R.ap)+' against '+share(R.base_test,1)+' by chance')
+    +kpi('Kept out (test)',share(R.flag_share),'catching '+share(R.caught)+' of the rugs')
+    +kpi('Rug rate',share(R.rate_kept,1)+' kept','against '+share(R.rate_flagged,1)+' among the coins kept out')
+    +kpi('After costs (test)',n2(R.net_kept)+' kept','against '+n2(R.net_flagged)+' kept out · '+n2(R.net_all)+' for all')+'</div>';
+  if(R.deciles&&R.deciles.length){
+    body+='<h3 class="sub-h">By rug score, lowest tenth first (test readings)</h3>'+table([''].concat(R.deciles.map(function(_d,i){return (i+1)+'';})),[
+      '<tr><td class="l">Pulled within 8 hours</td>'+R.deciles.map(function(d){return '<td>'+share(d.rug,1)+'</td>';}).join('')+'</tr>',
+      '<tr><td class="l">Average after costs</td>'+R.deciles.map(function(d){return '<td class="'+(d.net>0?'tr-up':'tr-dn')+'">'+n1(d.net)+'</td>';}).join('')+'</tr>'],'');}
+  var lbl={models:'Every model',random:'Random control',rules:'Scan rules',quick:'Quick rules'};
+  var rows=['models','random','rules','quick'].filter(function(g){return G[g];}).map(function(g){var k=G[g].kept,o=G[g].out,nk=k.n+k.n_open,no=o.n+o.n_open;
+    return '<tr><td class="l"><b>'+lbl[g]+'</b></td><td>'+int(nk)+'</td><td class="'+(k.total>0?'tr-up':'tr-dn')+'">'+dol(k.total)+'</td><td>'+(nk?dol(k.total/nk):'–')+'</td><td>'+(k.n?share(k.pulled/k.n,1):'–')+'</td>'
+      +'<td>'+int(no)+'</td><td class="'+(o.total>0?'tr-up':'tr-dn')+'">'+dol(o.total)+'</td><td>'+(no?dol(o.total/no):'–')+'</td><td>'+(o.n?share(o.pulled/o.n,1):'–')+'</td></tr>';});
+  body+='<h3 class="sub-h">Forward: paper trades since the filter started scoring</h3>'+(rows.length?table(['Who','Kept: trades','P/L','A trade','Pulled','Kept out: trades','P/L','A trade','Pulled'],rows,'cards')
+    :'<p class="empty">No trade has been scored yet: the scores start with the first scan after the rug model is trained.</p>');
+  if((R.leading||[]).length)body+='<p class="fine">Leans on: '+R.leading.map(function(x){return esc(varLabel(x[0]))+' <span class="ip">'+Math.round(x[1]*100)+'%</span>';}).join(', ')+'. Each model’s picks in the walk-forward test with the filter, and its paper P/L with the filter, are in the entry models’ table below.</p>';
+  return sec('Rug filter: keeping out coins likely to be pulled',body,'md-rug');
+}
+
+/* test 2: each win-or-lose model against its return twin on the same variables */
+function pairSec(){
+  var E=(M.entry||[]).filter(function(m){return !m.error;}),PS=M.pair_stats||[];if(!PS.length)return '';
+  var by={};E.forEach(function(m){by[m.id]=m;});
+  var rows=[],wf=[0,0],fw=[0,0],rg=[0,0];
+  var cnt=function(p){return p?p.n+p.n_open:0;},per=function(p){var k=cnt(p);return k?p.total/k:null;},pr=function(p){return p&&p.n?p.pulled/p.n:null;};
+  var two=function(a,b,f,better){return '<span class="nm">'+f(a)+' →</span>'+(a!=null&&b!=null&&better(a,b)?'<span class="tr-up">'+f(b)+'</span>':f(b));};
+  PS.forEach(function(q){var a=by[q.a+'.'+q.set],b=by[q.b+'.'+q.set];if(!a||!b)return;
+    var d=a.pick_net!=null&&b.pick_net!=null?b.pick_net-a.pick_net:null,ta=per(q.a_pnl),tb=per(q.b_pnl),ra=pr(q.a_pnl),rb=pr(q.b_pnl);
+    var enough=cnt(q.a_pnl)>=10&&cnt(q.b_pnl)>=10;
+    if(d!=null){wf[1]++;if(d>0)wf[0]++;}
+    if(enough&&ta!=null&&tb!=null){fw[1]++;if(tb>ta)fw[0]++;}
+    if(enough&&ra!=null&&rb!=null){rg[1]++;if(rb<ra)rg[0]++;}
+    rows.push('<tr><td class="l"><b>'+esc(a.algo)+'</b><br><span class="nm">against '+esc(b.algo)+'</span></td><td class="l">'+esc(setLabel(q.set))+'</td>'
+      +'<td>'+two(a.pick_net,b.pick_net,n2,function(x,y){return y>x;})+'</td><td class="'+(d==null?'':(d>0?'tr-up':'tr-dn'))+'">'+(d==null?'–':(d<0?MINUS:'+')+Math.abs(d).toFixed(2)+' pts')+'</td>'
+      +'<td>'+(enough?two(ta,tb,dol,function(x,y){return y>x;}):'<span class="nm">collecting</span>')+'<span class="nm">'+int(cnt(q.a_pnl))+' and '+int(cnt(q.b_pnl))+' trades since '+esc(utc(q.since).slice(5,10).replace('-','/'))+'</span></td>'
+      +'<td>'+(enough?two(ra,rb,function(v){return share(v,1);},function(x,y){return y<x;}):'–')+'</td></tr>');});
+  if(!rows.length)return '';
+  var body='<p class="trk-note">Each win-or-lose model beside its twin trained on the trade’s return itself, on the same variables and the same samples. A win-or-lose label counts a −80% rug as one more loss; a return label counts it as −60% (returns are capped at ±60% so one trade cannot swamp a model), so a return model learns to avoid the trades that sink the record. Ridge regression, the random forest, the neural network, the LSTM and the second LightGBM fit the return on squared error, which weighs that loss in full; gradient boosting, XGBoost and the first LightGBM on returns use absolute or Huber losses, which shrink it. Forward, each pair is compared on the same hours: both models’ trades since the later of the two started. So far the return twin did better out of sample in <b>'+int(wf[0])+' of '+int(wf[1])+'</b> pairs'+(fw[1]?', better forward a trade in '+int(fw[0])+' of '+int(fw[1]):'')+(rg[1]?', and had fewer of its closed trades end in a pulled pool in '+int(rg[0])+' of '+int(rg[1]):'')+'.</p>'
+    +table(['Win-or-lose model','<Variables','Picks: win-or-lose → return','Return better by','P/L a trade → return','Pulled → return'],rows,'cards')
+    +'<p class="fine"><b>Picks</b>: the walk-forward test’s top fifth of scores, average after costs. <b>P/L a trade</b>: forward, both models over the same hours, open trades at their last price; shown once each has 10 trades. <b>Pulled</b>: the share of its closed trades that ended because the pool lost half its liquidity. The return twin’s figure is in green where it is the better one.</p>';
+  return sec('Win-or-lose against return',body,'md-pairs');
+}
+
 function exitSec(){
   var X=(M.exit||[]).slice();
   if(!X.length)return sec('Exit models: when to sell','<p class="empty">'+(M.status==='ok'?'Not enough open-trade history yet to train them.':esc(M.status||'Waiting for the first training run'))+'.</p>','md-exit');
@@ -171,9 +229,10 @@ function logSec(){
     var xo=x.x_out?Object.keys(x.x_out).map(function(p){var e=(M.exit||[]).filter(function(q){return q.id===p;})[0]||{},v=x.x_out[p];return esc(e.algo||p)+' '+n1(v[0])+'<span class="nm">'+esc(utc(v[1]).slice(11))+'</span>';}).join(''):'<span class="nm">–</span>';
     return '<tr><td class="l">'+esc(utc(x.ts))+'</td><td class="l">'+coin(x.mint,x.sym)+'</td><td class="l">'+esc(m.algo||x.model)+'<br><span class="nm">'+esc(setLabel(m.set))+'</span></td>'
       +'<td>'+(x.sc!=null?f2(x.sc):'–')+'<span class="nm">needs '+(x.thr!=null?f2(x.thr):'a random draw')+'</span></td><td>'+price(x.price)+'</td><td>'+usd(x.mc)+'</td><td>'+usd(x.liq)+'</td>'
+      +'<td>'+(x.rug!=null?f2(x.rug)+'<span class="nm">'+(x.rug_hi?'<span class="tr-dn">kept out</span>':'kept')+'</span>':'<span class="nm">–</span>')+'</td>'
       +'<td class="l">'+res+'</td><td class="l">'+xo+'</td></tr>';});
-  return sec('Model trades','<p class="trk-note">Every paper entry a model has made in the last '+int(((D.trade||{}).cfg||{}).window_days||28)+' days, newest first: when (UTC), the coin, the model, its score and the threshold it had to reach, and the result under the live exit after costs. The last column is the same trade under each exit model.</p>'
-    +table(['<Entered (UTC)','<Coin','<Model','Score','Price','Market cap','Liquidity','<Live exit, after costs','<Under the exit models'],rows,'wide cards'),'md-log');
+  return sec('Model trades','<p class="trk-note">The latest paper entries the models have made (their settled trades are kept '+int((M.cfg||{}).keep_trade_days||14)+' days), newest first: when (UTC), the coin, the model, its score and the threshold it had to reach, and the result under the live exit after costs. Rug risk: the rug model’s score at the entry, and whether its filter would have kept the coin out. The last column is the same trade under each exit model.</p>'
+    +table(['<Entered (UTC)','<Coin','<Model','Score','Price','Market cap','Liquidity','Rug risk','<Live exit, after costs','<Under the exit models'],rows,'wide cards'),'md-log');
 }
 
 function sellLogSec(){
@@ -183,12 +242,12 @@ function sellLogSec(){
   var rows=L.slice(0,100).map(function(x){var d=x.live_ret!=null?x.ret-x.live_ret:null;
     return '<tr><td class="l">'+esc(utc(x.ts))+'</td><td class="l">'+coin(x.mint,x.sym)+'</td><td class="l">'+esc((X[x.model]||{}).algo||x.model)+'</td><td>'+price(x.price)+'</td><td>'+(x.h!=null?x.h.toFixed(1)+'h':'–')+'</td>'
       +'<td class="'+(x.ret>0?'tr-up':'tr-dn')+'">'+n1(x.ret)+'</td><td>'+(x.live_ret!=null?n1(x.live_ret):'<span class="nm">still open</span>')+'</td><td class="'+(d==null?'':(d>0?'tr-up':'tr-dn'))+'">'+(d==null?'–':(d<0?MINUS:'+')+Math.abs(d).toFixed(1)+' pts')+'</td></tr>';});
-  return sec('Exit model sales','<p class="trk-note">Every paper trade an exit model sold before the live exit would have, newest first ('+int(M.exit_sells||0)+' in the last '+int(((D.trade||{}).cfg||{}).window_days||28)+' days): when (UTC), the coin, the model, the price it sold at, and the result against the live exit on the same trade.</p>'
+  return sec('Exit model sales','<p class="trk-note">Every paper trade an exit model sold before the live exit would have, newest first ('+int(M.exit_sells||0)+' among the trades kept, the models’ for '+int((M.cfg||{}).keep_trade_days||14)+' days and the rules’ for '+int(((D.trade||{}).cfg||{}).window_days||28)+'): when (UTC), the coin, the model, the price it sold at, and the result against the live exit on the same trade.</p>'
     +table(['<Sold (UTC)','<Coin','<Exit model','Price','Held','After costs','Live exit','Difference'],rows,'cards'),'md-sells');
 }
 function howSec(){
   var c=M.cfg||{},S=M.study;
-  var how='<div class="tr-study"><p><b>Algorithms.</b> Logistic regression; random forest and extra trees (bagged trees); gradient boosting, XGBoost and LightGBM (boosted trees); k nearest neighbours; naive Bayes; a small neural network; an LSTM, a recurrent neural network that reads each coin’s last 8 scans in order; and five models of the trade’s return rather than whether it wins (ridge, random forest, gradient boosting, XGBoost, LightGBM). Each is trained on three variable sets: every variable, every variable except attention, and attention with the price path only, so the gap between the first two shows what attention adds. Four more sets (24 Oct) take the third apart, on six algorithms, one of each family, the LSTM and a return model: the price path alone, attention alone, the two with the pool’s size, and the price path with the minute data. A random-score model is trained and traded the same way as the control.</p>'
+  var how='<div class="tr-study"><p><b>Algorithms.</b> Logistic regression; random forest and extra trees (bagged trees); gradient boosting, XGBoost and LightGBM (boosted trees); k nearest neighbours; naive Bayes; a small neural network; an LSTM, a recurrent neural network that reads each coin’s last 8 scans in order; and five models of the trade’s return rather than whether it wins (ridge, random forest, gradient boosting, XGBoost, LightGBM). Each is trained on three variable sets: every variable, every variable except attention, and attention with the price path only, so the gap between the first two shows what attention adds. Four more sets (24 Oct) take the third apart: the price path alone, attention alone, the two with the pool’s size, and the price path with the minute data. Since 25 Oct every win-or-lose family has a twin trained on the return on every set (an LSTM and a neural network on returns, LightGBM on squared error beside its Huber loss), and a rug model scores every coin for the filter above. A random-score model is trained and traded the same way as the control.</p>'
     +'<p><b>Overfitting.</b> Every model is small and regularised (shallow trees with large leaves, early stopping, weight decay), because a few days of a few hundred coins cannot support more. Folds split by time, never at random, and train only on trades that had closed before the test window opened; thresholds come from training scores only; the luck line allows for testing many models at once. Retrained every '+(c.every_h||6)+' hours on everything since the ledger started (up to 60 days); a model older than '+(c.max_age_h||30)+' hours stops opening trades.</p>'
     +'<p><b>Limits.</b> A model sees what the scan saw, about every 15 minutes; its buys fill at the moment the scan decides, at the coin’s latest minute price, and its sales on the minute readings (a take-profit at its target). The history is short and one market regime; a model that cleared every test here could still fail when the market turns, which is why only the forward record can make a model live.</p></div>';
   var st2='';
@@ -215,7 +274,7 @@ function render(){
     :(M.status==='ok'&&M.fresh===false&&M.trained_at?'<p class="trk-note tr-dn">The latest models were trained '+esc(ago(M.trained_at,D.generated_at))+', longer ago than the '+((M.cfg||{}).max_age_h||30)+' hours a model may trade on; they open no trades until the next training run.</p>':'');
   var hs=howSec(),trained=(M.entry||[]).length>0;
   /* until the first models are trained, the study's table of every algorithm comes straight after the status */
-  w.innerHTML=head()+note+(trained?pnlSec():'')+entrySec()+(trained?'':hs[1])+exitSec()+logSec()+sellLogSec()+hs[0]+(trained?hs[1]:'');
+  w.innerHTML=head()+note+(trained?pnlSec()+rugSec()+pairSec():'')+entrySec()+(trained?'':hs[1])+exitSec()+logSec()+sellLogSec()+hs[0]+(trained?hs[1]:'');
   fitChart();
   $$('[data-tk]',w).forEach(function(b){b.onclick=function(){U.open(b.dataset.tk);};});
   ['set','kind','sort'].forEach(function(k){$$('[data-m'+k+']',w).forEach(function(b){b.onclick=function(){st[k]=b.getAttribute('data-m'+k);save();render();};});});

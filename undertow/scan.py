@@ -1214,7 +1214,7 @@ def restart_quick_records_once(st, policy):
     log(f"trade bench: {n} quick rules' records restart at 20:23:35 UTC on 21 Oct (after the old definitions' last trades)")
 
 
-def start_minutes(st, now, ds_all, lists, exits, loaded_x):
+def start_minutes(st, now, ds_all, lists, exits, loaded_x, bank=None):
     """Record the scan's reading of the watched coins as their minute at the scan, then start the minute sampler with
     the minute ledger (fast.py). Quick rules may buy only coins that passed every gate at the previous scan, whose
     gates were known throughout; a previous scan more than stale_scan_min minutes old lets nothing be bought."""
@@ -1228,6 +1228,8 @@ def start_minutes(st, now, ds_all, lists, exits, loaded_x):
     prev_ts, eligible = st.scan_passing(now)
     if prev_ts is None or now - prev_ts > fc["stale_scan_min"] * 60:
         eligible = {}
+    for m, (sc, hi) in (bank.rug_scores(eligible) if bank and eligible else {}).items():
+        eligible[m] = {**eligible[m], "rug": LAB._r(sc), "rug_hi": int(hi)}       # recorded on quick trades too
     policy = json.loads(st.get_meta("trade_policy") or "null") or {}
     rules = policy.get("rules") or []
     book = FAST.Book(st.open_sigs(), exits, rules, eligible, st.fast_last([r["id"] for r in rules if r.get("fast")]),
@@ -1389,7 +1391,7 @@ def trade_step(st, rows, ds_all, now, regime, bank=None, sampler=None, t_dec=Non
         log(f"trade review: {len(changes)} changes; live exit {policy['exit']}; "
             f"{sum(1 for x in policy['rules'] if x['status'] == 'live')} live rules")
 
-    picks, opened = {}, 0
+    picks, opened, rug = {}, 0, {}
     if policy:
         # rules on new data (attention, the minute data) and the models' rules join the bench at once (trade.add_rules)
         added = TRD.add_rules(policy, C.ATTENTION_RULES, now, ATTN_SOURCE)
@@ -1409,6 +1411,9 @@ def trade_step(st, rows, ds_all, now, regime, bank=None, sampler=None, t_dec=Non
             recent = st.tpath(now - (C.MODELS["seq_steps"] + 2) * 1800)      # the LSTM reads each coin's last scans
             seqs = {m: (recent[m], len(recent[m]) - 1) for m in feats if m in recent}
             picks = bank.fired(bank.entry_scores(feats, seqs), feats, now, C.MODELS["top_share"])
+        # the rug model's score for every coin passing every gate, recorded on each trade opened on it: the record
+        # of every rule and model with the rug filter is its trades the filter would have let through
+        rug = bank.rug_scores(feats) if bank else {}
         start_all = quick_start(exits, loaded_x)
         start_model = sorted({policy["exit"] if policy["exit"] in exits else C.DEFAULT_EXIT} | loaded_x)
         busy, held = st.busy_rules(now, cfg["reentry_h"]), st.live_open_mints()
@@ -1432,6 +1437,8 @@ def trade_step(st, rows, ds_all, now, regime, bank=None, sampler=None, t_dec=Non
                 live = rule["status"] == "live" and mint not in held
                 keep = {k: f.get(k) for k in TRD.SHOWN_AT_ENTRY + [c[0] for c in rule["all"]] if f.get(k) is not None}
                 keep["lag"] = fill[4]          # seconds between the price bought at and the decision
+                if mint in rug:
+                    keep["rug"], keep["rug_hi"] = LAB._r(rug[mint][0]), int(rug[mint][1])
                 if mid:                        # what the model saw: its score, its threshold, when it was trained
                     meta = (bank.entry.get(mid) or ({},))[0]
                     keep.update(sc=LAB._r(picks[mid][mint]), thr=LAB._r(meta.get("thr")), mv=round(bank.summary["trained_at"]))
@@ -1447,7 +1454,8 @@ def trade_step(st, rows, ds_all, now, regime, bank=None, sampler=None, t_dec=Non
     log(f"trade ledger: {len(path)} path rows, {len(open_sigs)} open paper trades, {len(hard & {s['mint'] for s in open_sigs})} "
         f"coins failing a structure gate, {opened} opened at the scan"
         + (f"; models: {sum(len(v) for v in picks.values())} picks from {len(picks)} models, {len(sells)} exit-model sells"
-           if bank and bank.fresh else ""))
+           if bank and bank.fresh else "")
+        + (f"; rug filter: {sum(1 for v in rug.values() if v[1])} of {len(rug)} coins kept out" if rug else ""))
     return policy, feats, changes, picks, sells, minute, closed_dec
 
 
@@ -1583,29 +1591,46 @@ def pnl_by_rule(sigs, older, carried, rules, cfg, now, series_for=lambda rid: ri
     the exit each was held to, open trades marked to their last price after the costs of selling there, and trades
     already pruned from the ledger from pnl_carry. Every trade counts from the moment it opens, so no result is left
     out for being slow to settle. sigs, older: the trades in the pages' window and the older ones still stored.
-    Returns {"rules": {rule: {since, real, open, total, n, n_open, wins, first, peak}}, "series": a cumulative realised
-    series for the rules series_for picks (the models), by close time on one time axis: {t0, step, v: {rule: [$ at the
-    end of each step]}}}; peak is the most trades open at once among those still stored."""
+    Returns {"rules": {rule: {since, real, open, total, n, n_open, wins, first, peak, pulled, pulled_usd, filt}},
+    "series": a cumulative realised series for the rules series_for picks (the models), by close time on one time axis:
+    {t0, step, v: {rule: [$ at the end of each step]}}}; peak is the most trades open at once among those still stored;
+    pulled the closed trades a liquidity pull ended; filt, for the trades opened since the rug model ran, the same
+    split by its call ({"kept"|"out": {total, n, n_open, pulled}})."""
     usd = cfg["usd"]
-    acc = {rid: {"since": r.get("added"), "real": 0.0, "open": 0.0, "n": 0, "n_open": 0, "wins": 0, "first": None}
-           for rid, r in rules.items()}
+    acc = {rid: {"since": r.get("added"), "real": 0.0, "open": 0.0, "n": 0, "n_open": 0, "wins": 0, "first": None,
+                 "pulled": 0, "pulled_usd": 0.0} for rid, r in rules.items()}
     ev, marks = defaultdict(list), defaultdict(list)
+    filt = {}                                  # rule -> {"kept"|"out": [$ total, closed, open, pulled]}
     for s in list(older) + list(sigs):
         a = acc.get(s["rule"])
         if a is None or s["in_ts"] < (a["since"] or 0):
             continue
         o = (s["out"] or {}).get(s["ref"])
+        hi = (s.get("f") or {}).get("rug_hi")  # the rug filter's call at the decision, on trades opened since it ran
+        b = None if hi is None else filt.setdefault(s["rule"], {"kept": [0.0, 0, 0, 0], "out": [0.0, 0, 0, 0]})["out" if hi else "kept"]
         if o:
             v = o[0] / 100 * usd
             a["real"] += v
             a["n"] += 1
             a["wins"] += 1 if o[0] > 0 else 0
+            pulled = o[2] == "liquidity pulled"
+            if pulled:
+                a["pulled"] += 1
+                a["pulled_usd"] += v
+            if b is not None:
+                b[0] += v
+                b[1] += 1
+                b[3] += 1 if pulled else 0
             ev[s["rule"]].append((o[3], v))
             marks[s["rule"]] += [(s["in_ts"], 1), (o[3], -1)]
         elif not s.get("done") and s["in_price"]:
             last = s.get("last_price") or s["in_price"]
-            a["open"] += TRD.net_ret(last / s["in_price"], s["in_liq"], s.get("last_liq"), cfg) / 100 * usd
+            v = TRD.net_ret(last / s["in_price"], s["in_liq"], s.get("last_liq"), cfg) / 100 * usd
+            a["open"] += v
             a["n_open"] += 1
+            if b is not None:
+                b[0] += v
+                b[2] += 1
             marks[s["rule"]].append((s["in_ts"], 1))
         else:                                  # settled without a result under its exit (that exit left the bench)
             continue
@@ -1629,7 +1654,9 @@ def pnl_by_rule(sigs, older, carried, rules, cfg, now, series_for=lambda rid: ri
             cur += d
             peak = max(peak, cur)
         out[rid] = {**a, "real": round(a["real"], 2), "open": round(a["open"], 2), "total": round(a["real"] + a["open"], 2),
-                    "peak": peak}
+                    "peak": peak, "pulled_usd": round(a["pulled_usd"], 2)}
+        if rid in filt:
+            out[rid]["filt"] = {k: {"total": round(v[0], 2), "n": v[1], "n_open": v[2], "pulled": v[3]} for k, v in filt[rid].items()}
     pick = {rid: sorted(v) for rid, v in ev.items() if series_for(rid)}
     series = None
     ts = [t for v in pick.values() for t, _x in v]
@@ -1728,7 +1755,52 @@ MOD_RANDOM = "random"                     # the random control's model id (model
 ENTRY_KEYS = ("id", "slug", "algo", "family", "kind", "set", "n_vars", "n_test", "auc", "auc_sd", "train_auc", "gap",
               "accuracy", "balanced_acc", "brier", "logloss", "ic", "picks", "pick_coins", "pick_win", "pick_net", "pick_med",
               "pick_t", "base_net", "edge", "luck_one", "luck_best", "beats_luck", "thr", "leading", "train_rows",
-              "train_coins", "seconds_wf", "seconds_fit", "error")
+              "train_coins", "seconds_wf", "seconds_fit", "error", "pick_rug", "pick_kept", "pick_kept_net", "pick_kept_rug",
+              "pick_kept_t")
+RUG_KEYS = ("status", "algo", "label", "share", "hours", "samples", "rugs", "base", "n_vars", "n_test", "rugs_test", "base_test",
+            "auc", "ap", "train_auc", "gap", "flag_share", "caught", "rate_flagged", "rate_kept", "net_flagged", "net_kept",
+            "net_all", "kept_t", "deciles", "leading", "error")
+
+
+def filter_groups(pnl_rules, rules):
+    """The rug filter's split, summed over every model (the random control apart), the random control, the scan's
+    rules and the quick rules: {group: {"kept"|"out": {total, n, n_open, pulled}}}, from trades opened since it ran."""
+    groups = {"models": lambda r: r.get("model") and r["id"] != "m:" + MOD_RANDOM, "random": lambda r: r["id"] == "m:" + MOD_RANDOM,
+              "rules": lambda r: not r.get("model") and not r.get("fast"), "quick": lambda r: r.get("fast")}
+    out = {}
+    for g, pick in groups.items():
+        acc = {k: {"total": 0.0, "n": 0, "n_open": 0, "pulled": 0} for k in ("kept", "out")}
+        for rid, p in pnl_rules.items():
+            r = rules.get(rid)
+            if not r or not p.get("filt") or not pick(r):
+                continue
+            for k in ("kept", "out"):
+                for f in ("total", "n", "n_open", "pulled"):
+                    acc[k][f] += p["filt"][k][f]
+        if any(acc[k]["n"] + acc[k]["n_open"] for k in acc):
+            out[g] = {k: {**v, "total": round(v["total"], 2)} for k, v in acc.items()}
+    return out
+def pair_records(by_rule, rules, entry_ids, pairs, cfg, now):
+    """Each win-or-lose model against its return twin on the same variables, forward over the same hours: both models'
+    trades opened since the later of the two joined the bench (closed at their result, open at their last price, after
+    costs), so a pair is never judged on two different markets. by_rule: {rule: its trades}. Returns
+    [{set, a, b, since, a_pnl, b_pnl}] with each side's {total, n, n_open, pulled}."""
+    out = []
+    sets = sorted({mid.split(".", 1)[1] for mid in entry_ids if "." in mid})
+    for set_name in sets:
+        for a, b in pairs:
+            ra, rb = rules.get(f"m:{a}.{set_name}"), rules.get(f"m:{b}.{set_name}")
+            if not ra or not rb or f"{a}.{set_name}" not in entry_ids or f"{b}.{set_name}" not in entry_ids:
+                continue
+            since = max(ra.get("added") or 0, rb.get("added") or 0)
+            sub = by_rule.get(ra["id"], []) + by_rule.get(rb["id"], [])
+            p = pnl_by_rule(sub, [], {}, {ra["id"]: {"added": since}, rb["id"]: {"added": since}}, cfg, now,
+                            series_for=lambda _r: False)["rules"]
+            side = lambda r: {k: p[r][k] for k in ("total", "n", "n_open", "pulled")}
+            out.append({"set": set_name, "a": a, "b": b, "since": since, "a_pnl": side(ra["id"]), "b_pnl": side(rb["id"])})
+    return out
+
+
 EXIT_KEYS = ("id", "slug", "algo", "family", "n_vars", "decisions", "auc", "train_auc", "gap", "accuracy", "sell_rate",
              "trades", "net", "base_net", "gain", "gain_t", "early", "thr", "leading", "seconds", "error")
 
@@ -1740,7 +1812,8 @@ def models_page(st, bank, policy, tpage, now, picks, sells, sigs=None, pnl=None)
     S = (bank.summary if bank else None) or {}
     out = {"available": MOD is not None, "status": S.get("status") or "waiting for the first training run",
            "study": C.ML_STUDY, "cfg": {k: C.MODELS[k] for k in ("every_h", "top_share", "exit_thr", "fold_h", "min_samples",
-                                                                   "min_coins", "max_age_h", "luck_draws")},
+                                                                   "min_coins", "max_age_h", "luck_draws", "keep_trade_days",
+                                                                   "rug_share", "rug_h")},
            "sets": C.MODEL_SETS}
     if bank:
         out.update(fresh=bank.fresh, errors=bank.errors[:20], age_h=round(getattr(bank, "age_h", 0) or 0, 1))
@@ -1786,7 +1859,8 @@ def models_page(st, bank, policy, tpage, now, picks, sells, sigs=None, pnl=None)
         o = (s["out"] or {}).get(live_exit["id"])
         row = {"id": s["id"], "ts": s["in_ts"], "sym": s["sym"], "mint": s["mint"], "model": s["rule"][2:],
                "sc": (s["f"] or {}).get("sc"), "thr": (s["f"] or {}).get("thr"), "mv": (s["f"] or {}).get("mv"),
-               "price": s["in_price"], "mc": s["in_mc"], "liq": s["in_liq"], "live": bool(s["live"])}
+               "price": s["in_price"], "mc": s["in_mc"], "liq": s["in_liq"], "live": bool(s["live"]),
+               "rug": (s["f"] or {}).get("rug"), "rug_hi": (s["f"] or {}).get("rug_hi")}
         if o:
             row.update(ret=o[0], h=o[1], why=o[2], out_ts=o[3])
         else:
@@ -1811,12 +1885,21 @@ def models_page(st, bank, policy, tpage, now, picks, sells, sigs=None, pnl=None)
         keep = {e["rule"] for e in entry}
         ser = {**ser, "v": {k: v for k, v in ser["v"].items() if k in keep}}
     mods = [e["pnl"] for e in entry if e.get("pnl") and e["id"] != MOD_RANDOM]
+    rug = S.get("rug") or {}
     out.update(entry=entry, exit=exit_rows, log=log_rows, exit_log=xlog[:150], exit_sells=len(xlog),
                live_exit={"id": live_exit["id"], "label": TRD.exit_label(live_exit)}, trades_total=len(sigs),
                pnl_series=ser, pnl_usd=cfg["usd"],
                pnl_all={"total": round(sum(p["total"] for p in mods), 2), "real": round(sum(p["real"] for p in mods), 2),
                         "open": round(sum(p["open"] for p in mods), 2), "n": sum(p["n"] + p["n_open"] for p in mods),
-                        "up": sum(1 for p in mods if p["total"] > 0), "models": len(mods)})
+                        "closed": sum(p["n"] for p in mods), "pulled": sum(p.get("pulled") or 0 for p in mods),
+                        "pulled_usd": round(sum(p.get("pulled_usd") or 0 for p in mods), 2),
+                        "up": sum(1 for p in mods if p["total"] > 0), "models": len(mods)},
+               rug={**{k: rug.get(k) for k in RUG_KEYS if k in rug}, "leading": (rug.get("leading") or [])[:6],
+                    "loaded": bool(bank and getattr(bank, "rug", None))} if rug else None,
+               rug_groups=filter_groups((pnl or {}).get("rules") or {}, rules),
+               pairs=[list(p) for p in MOD.PAIRS] if MOD else [],
+               pair_stats=pair_records(by_rule, rules, {e["id"] for e in entry if not e.get("error")},
+                                       MOD.PAIRS if MOD else [], cfg, now))
     return out
 
 
@@ -1904,7 +1987,7 @@ def run(args):
     sampler = None
     if not getattr(args, "no_minutes", False) and ds_all:
         try:                                   # the minute layer must never stop a scan
-            sampler = start_minutes(st, now, ds_all, lists, exits, loaded_exits(exits, bank))
+            sampler = start_minutes(st, now, ds_all, lists, exits, loaded_exits(exits, bank), bank)
         except Exception as e:
             log(f"minute sampler: not started ({type(e).__name__}: {e})")
     n_up = update_outcomes(st, ds_all, now)

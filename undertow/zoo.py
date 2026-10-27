@@ -134,6 +134,21 @@ def lightgbm_reg():
                          random_state=0, verbose=-1)
 
 
+def lightgbm_l2():
+    """LightGBM on the return with squared error: unlike the Huber loss above, a -60% trade weighs in full."""
+    from lightgbm import LGBMRegressor
+    return LGBMRegressor(n_estimators=300, max_depth=4, num_leaves=15, learning_rate=0.05, min_child_samples=60,
+                         subsample=0.8, subsample_freq=1, colsample_bytree=0.8, reg_lambda=1.0, objective="regression",
+                         random_state=0, verbose=-1)
+
+
+def mlp_reg():
+    from sklearn.neural_network import MLPRegressor
+    return make_pipeline(_imp(True), StandardScaler(),
+                         MLPRegressor(hidden_layer_sizes=(32, 16), alpha=1e-3, early_stopping=True, validation_fraction=0.15,
+                                      max_iter=300, random_state=0))
+
+
 REGRESSION = {"Ridge regression": ridge, "Random forest (return)": random_forest_reg,
               "Gradient boosting (return)": gradient_boosting_reg, "XGBoost (return)": xgboost_reg,
               "LightGBM (return)": lightgbm_reg}

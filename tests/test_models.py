@@ -35,6 +35,33 @@ def synthetic_path(n_coins=40, hours=60, seed=1, signal=0.6):
     return path
 
 
+def rug_path(n_coins=40, hours=60, seed=3, share=0.35):
+    """Coins scanned every 15 minutes, a share of them rugged once: for eight hours before the pull their turnover
+    ('turn') runs high, then liquidity and price fall by four fifths and the coin stops passing the gates. The rest
+    drift; every other variable is noise."""
+    rng = random.Random(seed)
+    path, t0 = {}, 1_800_000_000.0
+    for c in range(n_coins):
+        mint, p, liq, rows = f"R{c:03d}", 1.0, 150_000.0, []
+        rug_at = rng.randint(12 * 4, (hours - 10) * 4) if rng.random() < share else None
+        for k in range(hours * 4):
+            ts = t0 + k * 900 + c
+            if rug_at is not None and k >= rug_at:
+                if k == rug_at:
+                    p, liq = p * 0.2, liq * 0.2
+                rows.append((ts, "G", p, liq, -80.0, None))
+                if k > rug_at + 8:
+                    break
+                continue
+            p *= math.exp(rng.gauss(0, 0.02))
+            hot = rug_at is not None and rug_at - 32 <= k < rug_at
+            f = {"turn": (5.0 if hot else 0.5) + rng.random(), "liq": liq, "mc": p * 1e6, "ru6": rng.random() * 30,
+                 "vola": rng.random() * 4, "c1h": rng.gauss(0, 5), "nf1h_liq": rng.gauss(0, 0.05), "org": rng.random() * 100}
+            rows.append((ts, "I", p, liq, f["c1h"], f))
+        path[mint] = rows
+    return path
+
+
 class Attention(unittest.TestCase):
     def test_ranks_spikes_and_growth(self):
         now = 1_000_000.0
@@ -200,6 +227,64 @@ class Models(unittest.TestCase):
                           self.dir, log=lambda *a: None, set_algos={"price": ("logit",)})
         self.assertEqual(sorted(m["id"] for m in s["entry"]), ["logit.all", "logit.price", "random", "ridge.all"])
 
+    def test_rug_labels_mark_a_pool_that_halves_within_8_hours(self):
+        t0 = 1_000_000.0
+        rows = [(t0 + k * 3600, "I", 1.0, 100_000.0 if k < 10 else 40_000.0, 0.0, {"liq": 1}) for k in range(14)]
+        samples = [{"mint": "A", "i": i} for i in range(10)]
+        lab = MOD.rug_labels({"A": rows}, samples, 8, 0.5)
+        self.assertEqual(lab.tolist(), [0, 0, 1, 1, 1, 1, 1, 1, 1, 1])      # pulled at hour 10: within 8h from hour 2
+
+    def test_rug_model_trains_scores_and_marks_the_picks(self):
+        MOD.ALGOS = [("logit", "Logistic regression", "cls"), ("ridge", "Ridge regression", "ret")]
+        s = MOD.train_all(rug_path(), self.pol, C.TRADE, self.cfg, {"all": "every variable"}, self.dir, log=lambda *a: None)
+        self.assertEqual(s["status"], "ok", s.get("status"))
+        r = s["rug"]
+        self.assertEqual(r["status"], "ok", r)
+        self.assertGreater(r["auc"], 0.8)                                   # the planted warning sign is found out of sample
+        self.assertLess(r["rate_kept"], r["rate_flagged"])
+        self.assertTrue(os.path.exists(os.path.join(self.dir, "rug.pkl")))
+        self.assertEqual(r["leading"][0][0], "turn")
+        ent = {m["id"]: m for m in s["entry"]}
+        self.assertIn("pick_kept_net", ent["logit.all"])                    # each model's test picks with the filter
+        self.assertIn("pick_kept", ent["random"])
+        bank = MOD.Bank(self.dir, s["trained_at"] + 60, 30)
+        self.assertIsNotNone(bank.rug)
+        sc = bank.rug_scores({"hot": {"turn": 5.5, "liq": 150_000}, "calm": {"turn": 0.6, "liq": 150_000}})
+        self.assertGreater(sc["hot"][0], sc["calm"][0])
+        self.assertEqual((sc["hot"][1], sc["calm"][1]), (True, False))
+        self.assertEqual(MOD.Bank(self.dir, s["trained_at"] + 40 * H, 30).rug_scores({"x": {"turn": 5}}), {})   # stale: none
+
+    def test_the_rug_model_waits_for_enough_rugs(self):
+        s = MOD.train_all(synthetic_path(n_coins=40, hours=70), self.pol, C.TRADE, self.cfg, {"all": "x"}, self.dir,
+                          log=lambda *a: None)
+        self.assertTrue(s["rug"]["status"].startswith("collecting"))
+        self.assertIsNone(MOD.Bank(self.dir, s["trained_at"] + 60, 30).rug)
+
+    def test_a_return_lstm_learns_a_planted_return(self):
+        from undertow.lstm import LSTM
+        rng = np.random.default_rng(0)
+        X = rng.normal(0, 1, (900, 6, 3))
+        Mk = np.ones((900, 6))
+        y = 5 * X[:, :, 0].mean(axis=1) + rng.normal(0, 0.5, 900)
+        m = LSTM(3, hidden=8, epochs=30, task="reg").fit(X[:700], Mk[:700], y[:700])
+        pred = m.predict(X[700:], Mk[700:])
+        self.assertGreater(np.corrcoef(pred, y[700:])[0, 1], 0.6)
+        self.assertLess(abs(pred.mean() - y[700:].mean()), 1.0)               # in the units it was trained on
+        back = LSTM.from_dict(json.loads(m.dumps()))
+        self.assertTrue(np.allclose(back.predict(X[700:], Mk[700:]), pred))
+        fm = MOD.fit("lstm_ret", "seq_ret", None, None, y[:700], X[:700], Mk[:700])
+        self.assertEqual(fm.score(X[700:], Mk[700:]).shape, (200,))
+
+    def test_every_pair_is_two_real_algorithms(self):
+        slugs = {a[0]: a[2] for a in self.algos}                            # the full list (setUp trims MOD.ALGOS)
+        for a, b in MOD.PAIRS:
+            self.assertIn(slugs[a], ("cls", "seq"))
+            self.assertIn(slugs[b], ("ret", "seq_ret"))
+        for k, want in C.MODEL_SET_ALGOS.items():            # the newer sets carry both halves of their pairs
+            for a, b in MOD.PAIRS:
+                if a in want and a not in ("gb", "xgb"):
+                    self.assertIn(b, want, (k, a, b))
+
     def test_collecting_until_enough_samples(self):
         s = MOD.train_all(synthetic_path(n_coins=3, hours=20), self.pol, C.TRADE, self.cfg, {"all": "x"}, self.dir,
                           log=lambda *a: None)
@@ -285,6 +370,43 @@ class ScanSide(unittest.TestCase):
             SC.scan_step(st, ds2, now + 900, {e["id"]: e for e in SC.exit_pool_of(bank)}, C.TRADE)
             SC.trade_step(st, [fake_row(m, 0.97) for m in ("A", "B")], ds2, now + 900, {}, bank)
             self.assertTrue(all("x:logit" in x["st"] or "x:logit" in x["out"] for x in st.sigs() if x["rule"] == "m:logit.all"))
+        finally:
+            MOD.ALGOS, MOD.EXIT_ALGOS = algos, exit_algos
+            SC.trade_features = feat
+
+    @unittest.skipUnless(HAVE_ML, "needs numpy and scikit-learn")
+    def test_every_new_trade_carries_the_rug_models_call(self):
+        SC, st = self.SC, self.st
+        algos, exit_algos = MOD.ALGOS, MOD.EXIT_ALGOS
+        MOD.ALGOS, MOD.EXIT_ALGOS = [("logit", "Logistic regression", "cls")], []
+        feat = SC.trade_features
+        try:
+            mdir = os.path.join(self.dir, "models")
+            cfg = {**C.MODELS, "min_samples": 300, "min_coins": 10, "min_train": 150, "min_test": 50, "fold_h": 6, "luck_draws": 20}
+            s = MOD.train_all(rug_path(), {"id": "tp10_8h", "tp": 10, "max_h": 8}, C.TRADE, cfg, {"all": "every variable"},
+                              mdir, log=lambda *a: None)
+            self.assertEqual(s["rug"]["status"], "ok")
+            now = s["trained_at"] + 60
+            bank = MOD.Bank(mdir, now, 30)
+            hot = {"A": 5.5, "B": 0.6}
+            SC.trade_features = lambda st_, r, now_, regime: {"turn": hot[r["t"]["mint"]], "liq": 150_000.0, "ru6": 5.0}
+            sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+            from test_trade import fake_row
+            rows = [fake_row(m, 1.0) for m in ("A", "B")]
+            ds = {m: {"price": 1.0, "liq": 1.5e5, "chg": {"h1": 0.0}} for m in ("A", "B")}
+            pol, feats, _ch, picks, sells, _minute, _closed = SC.trade_step(st, rows, ds, now, {}, bank)
+            sigs = st.sigs()
+            self.assertTrue(sigs)
+            self.assertTrue(all(x["f"].get("rug") is not None for x in sigs))
+            calls = {x["mint"]: x["f"]["rug_hi"] for x in sigs}
+            self.assertEqual((calls.get("A"), calls.get("B")), (1, 0))          # the hot coin is kept out, the calm one kept
+            rules = {r["id"]: r for r in pol["rules"]}
+            pnl = SC.pnl_by_rule(sigs, [], {}, rules, C.TRADE, now + 60)
+            mp = SC.models_page(st, bank, pol, SC.trade_page(st, pol, feats, rows, now, SC.exit_pool_of(bank), picks, sigs,
+                                                             None, pnl), now, picks, sells, sigs, pnl)
+            self.assertGreater(mp["rug"]["auc"], 0.8)
+            self.assertTrue(mp["rug_groups"])                                   # kept and kept out, by group
+            self.assertTrue(all(r.get("rug") is not None for r in mp["log"]))
         finally:
             MOD.ALGOS, MOD.EXIT_ALGOS = algos, exit_algos
             SC.trade_features = feat

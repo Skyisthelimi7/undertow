@@ -99,7 +99,7 @@ class Book:
             if not TRD.fires(r, f) or (r.get("random") and not MIN.draw(m, ts, rid, r["random"])):
                 continue                   # a random control keeps its conditions (the pool floor) and then draws
             live = r["status"] == "live" and m not in self.held
-            keys = TRD.SHOWN_AT_ENTRY + list(MIN.KEYS) + [c[0] for c in r.get("all") or []]
+            keys = TRD.SHOWN_AT_ENTRY + list(MIN.KEYS) + ["rug", "rug_hi"] + [c[0] for c in r.get("all") or []]
             s = {"id": None, "rule": rid, "mint": m, "sym": self.syms.get(m), "in_ts": ts, "in_price": t["price"],
                  "in_liq": t.get("liq"), "in_mc": t.get("mc"), "f": {k: f[k] for k in keys if f.get(k) is not None},
                  "ref": r["exit"], "live": 1 if live else 0, "out": {}, "st": TRD.start_states(t["price"], self.start),
