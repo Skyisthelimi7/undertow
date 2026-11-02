@@ -254,6 +254,45 @@ class Models(unittest.TestCase):
         self.assertEqual((sc["hot"][1], sc["calm"][1]), (True, False))
         self.assertEqual(MOD.Bank(self.dir, s["trained_at"] + 40 * H, 30).rug_scores({"x": {"turn": 5}}), {})   # stale: none
 
+    def test_older_coins_get_a_cut_of_their_own(self):
+        sc = np.array([0.9, 0.8, 0.1, 0.2, 0.3] * 20)
+        age = np.array([5, 5, 300, 300, 300] * 20, float)
+        self.assertIsNone(MOD.old_cut(sc, age, None, 0.1))
+        self.assertAlmostEqual(MOD.old_cut(sc, age, 168, 0.1), float(np.quantile([0.1, 0.2, 0.3] * 20, 0.9)))
+        self.assertIsNone(MOD.old_cut(sc[:10], age[:10], 168, 0.1))          # too few old readings to set one
+        self.assertIsNone(MOD.old_cut(sc, np.full(len(sc), np.nan), 168, 0.1))   # an unknown age is never old
+
+        class Score:                                                         # scores the plain variable "vola"
+            def score(self, X):
+                return X[:, 0]
+        bank = MOD.Bank.__new__(MOD.Bank)
+        bank.fresh, bank.errors = True, []
+        bank.rug = ({"keys": ["vola"], "thr": 0.5, "thr_old": 0.2, "old_h": 168}, Score())
+        feats = {"young_hot": {"vola": 0.6, "age": 5}, "young_mild": {"vola": 0.3, "age": 5},
+                 "old_mild": {"vola": 0.3, "age": 300}, "old_calm": {"vola": 0.1, "age": 300}, "no_age": {"vola": 0.3}}
+        calls = {m: v[1] for m, v in bank.rug_scores(feats).items()}
+        self.assertEqual(calls, {"young_hot": True, "young_mild": False, "old_mild": True, "old_calm": False, "no_age": False})
+        self.assertEqual(bank.rug_version, 2)
+        bank.rug = ({"keys": ["vola"], "thr": 0.5, "old_h": 168}, Score())   # a model trained before the cut
+        self.assertFalse(bank.rug_scores(feats)["old_mild"][1])
+        self.assertEqual(bank.rug_version, 1)
+
+    def test_the_rug_model_reports_its_test_by_age(self):
+        path = rug_path()
+        for rows in path.values():                                         # the second half of the coins are old
+            for k, r in enumerate(rows):
+                if r[5] is not None:
+                    r[5]["age"] = 6.0 + k / 4 if int(rows[0][0]) % 2 == 0 else 400.0 + k / 4
+        s = MOD.train_all(path, self.pol, C.TRADE, self.cfg, {"all": "every variable"}, self.dir, log=lambda *a: None)
+        r = s["rug"]
+        self.assertEqual(r["status"], "ok", r)
+        self.assertEqual((r["old_h"], r["old_share"]), (C.MODELS["rug_old_h"], C.MODELS["rug_old_share"]))
+        self.assertIsNotNone(r["thr_old"])
+        labels = [a["label"] for a in r["ages"]]
+        self.assertIn("a week or more", labels)
+        self.assertTrue(all(0 <= a["out"] <= 1 for a in r["ages"]))
+        self.assertEqual(MOD.Bank(self.dir, s["trained_at"] + 60, 30).rug_version, 2)
+
     def test_the_rug_model_waits_for_enough_rugs(self):
         s = MOD.train_all(synthetic_path(n_coins=40, hours=70), self.pol, C.TRADE, self.cfg, {"all": "x"}, self.dir,
                           log=lambda *a: None)

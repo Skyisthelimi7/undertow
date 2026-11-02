@@ -245,9 +245,10 @@ TG_KEEP_DAYS = 8                  # Telegram member counts, for growth rates
 
 # ---- Buy and sell signals (added 21 Oct 2026; undertow/trade.py says how a rule earns a live signal) ------------------
 # Paper trades only. Every rule on the bench records what following it would have returned after costs on a usd-sized
-# position; the live ledger is the record of the rules that earned it. fee_pct is a per-side allowance for pool,
-# protocol and creator fees: PumpSwap charges 0.25% plus a creator fee that falls with market cap (0.95% under $300k,
-# 0.05% above $20M), other venues 0.25% to 1%; a trading bot adds about 1% a side on top, which this leaves out.
+# position; the live ledger is the record of the rules that earned it. Fees a side are the coin's own venue's
+# (VENUE_FEES, PUMPSWAP_FEES; since 2 Nov 2026, every result before then priced again): PumpSwap's by market cap, the
+# fixed published rate elsewhere, and fee_pct, a 1% allowance, where a venue's rate is not fixed (Meteora's dynamic
+# fees, Orca's tiers) or the venue is unknown. A trading bot adds about 1% a side on top, which this leaves out.
 # tx_usd is the network fee a transaction (base fee plus a modest priority fee). Price impact comes on top, from the
 # pool's liquidity, so it is the one cost a smaller position shrinks. The ledger is kept at $100 a trade (it was $500
 # until 22 Oct 2026; every recorded result was priced again at $100 then, scan.reprice_ledger), and the Buy & sell tab
@@ -257,11 +258,34 @@ TG_KEEP_DAYS = 8                  # Telegram member counts, for growth rates
 # A rule trades a coin at most once every reentry_h hours (and never while its last trade there is open), so one
 # coin's readings cannot fill a rule's record. Coins are followed for follow_h hours after they leave the screener;
 # the path is kept path_days, and paper trades keep_days (the live rules' trades for good).
-TRADE = {"usd": 100, "fee_pct": 1.0, "tx_usd": 0.05, "sizes": (25, 100, 500), "reentry_h": 24, "follow_h": 48,
+# The price check before entry (2 Nov 2026, trade.jump_check): a coin whose reading has its price check_price_x times
+# (or 1/check_price_x of) the median of its last three readings within check_window_min minutes, with its liquidity
+# moved the same way by check_liq_x or more, is not bought until later readings confirm the level. One scan read
+# Jimothy (107 days old, a $335k pool) at 3x its price and twice its liquidity; 15 trades bought it and "lost" 67% at
+# the next, true reading. From 27 Oct to 2 Nov 2026 the check would have held back 624 of 42,597 trades on 66 coins,
+# 102 of the 107 opened on a reading out of line with the readings either side; the 522 others lost 11% each against
+# 5.5% for the rest (a coin that just jumped, or whose pool just shrank with its price, is a poor buy anyway).
+# sol_usd: the SOL price for PumpSwap's market-cap tiers when the scan has no reading of its own.
+TRADE = {"usd": 100, "fee_pct": 1.0, "tx_usd": 0.05, "sol_usd": 95.0, "sizes": (25, 100, 500), "reentry_h": 24, "follow_h": 48,
          "max_miss": 3, "liq_pull": 0.5, "path_days": 14, "window_days": 28, "keep_days": 60, "every_days": 7, "min_trades": 30, "min_edge": 1.0, "z": 2.0,
          "promote_after": 2, "retire_after": 2, "max_promotions": 1, "max_live": 2, "testing": 40, "add_per_review": 4,
          "stale_after": 6, "retest_after_days": 56, "switch_min_gain": 1.0, "switch_after": 2,
-         "var_min_n": 300, "var_min_rho": 0.05, "var_retire_after": 3, "warn_gap": 2.0}
+         "var_min_n": 300, "var_min_rho": 0.05, "var_retire_after": 3, "warn_gap": 2.0,
+         "check_price_x": 1.5, "check_liq_x": 1.3, "check_window_min": 90}
+# Pool fees a side (2 Nov 2026). PUMPSWAP_FEES: pump.fun's dynamic fees on PumpSwap by the coin's market cap in SOL, as
+# (from, total %): LP 0.20% and protocol 0.05% plus a creator fee stepping down from 0.95% at 420 SOL to 0.05% from
+# 98,240 SOL, and 1.25% below 420 SOL (0.93% protocol, 0.30% creator, 0.02% LP). The steps at 420, 1,470, 9,820,
+# 34,380, 49,120, 63,860 and 98,240 SOL were checked against coinpaprika's launchpad-fee guide (October 2026) and the
+# on-chain fee config read by github.com/hrekokovgmmek-lab/pumpswap-fee-decoder; the steps between follow the same
+# 0.05-point (0.025 from 49,120 SOL) ladder. VENUE_FEES: Raydium's published rate for AMM v4, the default CPMM and
+# CLMM tiers and LaunchLab's graduated pools (docs.raydium.io, fee comparison). Every other venue takes fee_pct.
+# On the trades from 20 Oct to 2 Nov 2026 (SOL about $95) PumpSwap's coins paid 1.05% a side on average, a little more
+# than the old flat 1%, and Raydium's 0.25%: the ledger's results moved by +$0.06 a trade overall.
+PUMPSWAP_FEES = ((0, 1.25), (420, 1.20), (1470, 1.15), (2460, 1.10), (3440, 1.05), (4420, 1.00), (9820, 0.95),
+                 (14740, 0.90), (19650, 0.85), (24560, 0.80), (29470, 0.75), (34380, 0.70), (39300, 0.65), (44210, 0.60),
+                 (49120, 0.55), (54030, 0.525), (58940, 0.50), (63860, 0.475), (68770, 0.45), (73681, 0.425),
+                 (78590, 0.40), (83500, 0.375), (88400, 0.35), (93330, 0.325), (98240, 0.30))
+VENUE_FEES = {"raydium": 0.25, "raydium-clmm": 0.25, "raydium-cpmm": 0.25, "raydium-launchlab": 0.25}
 
 
 def _rule(rid, label, *conds):
@@ -476,7 +500,16 @@ MODELS = {"every_h": 6, "min_samples": 1200, "min_coins": 40, "fold_h": 8, "min_
           # 15% it kept out 16% of readings with 93% of their rugs, and the readings it kept averaged -4.1% after costs
           # against -16.5% for those it kept out (-6.1% for all). Age alone scores 0.94: most of what it knows is that
           # a coin a few hours old is the one likely to collapse.
-          "rug_h": 8, "rug_liq": 0.5, "rug_share": 0.15}
+          # The cut for older coins (2 Nov): coins at least rug_old_h hours old are also kept out when their score is
+          # in the top rug_old_share of what the training data scored for coins that old. The global cut almost never
+          # reached them (1% of week-old readings kept out, 1 of 14 of their rugs caught in the walk-forward test of
+          # 2 Nov) although the forest ranks them well (AUC 0.94 within week-old coins; 0.83 on their real pulls since
+          # 27 Oct). With the cut: 13.5% of their test readings kept out, 13 of 14 rugs caught, kept -2.8% against
+          # -7.6% kept out; on the live record 8 of 11 pulls for 9% of their coin-hours. Coins 1 to 7 days old stay
+          # without one: nothing recorded ranks their rugs (AUC 0.33-0.51 walk-forward, 0.44-0.62 live; a forest of
+          # their own and weighting their rugs did no better), and a cut there kept out good trades with the bad.
+          # Nearly every "rug" past the first day is a dump, the price collapsing with the pool, not a pulled pool.
+          "rug_h": 8, "rug_liq": 0.5, "rug_share": 0.15, "rug_old_h": 168, "rug_old_share": 0.10}
 # The variable sets the algorithms are trained on, so the page can show what each set adds. The last four (24 Oct)
 # take apart the set the best forward record came from (attention and the price path): the price path alone,
 # attention alone, the two with the pool's size, and the price path with the minute data. They train the algorithms

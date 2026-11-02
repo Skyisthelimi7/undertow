@@ -17,9 +17,9 @@ The weekly review reads those records:
                coins that fell, the same way in both halves of the window? Variables that do seed new rules; variables
                that keep showing nothing stop seeding rules and are checked again later.
 """
-import math, time
+import math, statistics, time
 from collections import defaultdict
-from . import lab as LAB, attention as ATT, minute as MIN
+from . import config as C, lab as LAB, attention as ATT, minute as MIN
 
 H = 3600
 OPS = {">=": lambda a, b: a >= b, ">": lambda a, b: a > b, "<=": lambda a, b: a <= b, "<": lambda a, b: a < b}
@@ -129,23 +129,84 @@ def cost_pct(liq, usd, fee, tx_usd=0.0):
     return min(100.0, usd / (liq / 2 + usd) * 100 + fee + tx_usd / usd * 100)
 
 
-def net_ret(x, liq_in, liq_out, cfg, usd=None):
+def net_ret(x, liq_in, liq_out, cfg, usd=None, fee=None):
     """Net return in % for a price multiple x, after paying costs to get in and to get out, on a position of usd
-    dollars (the ledger's size when not given)."""
+    dollars (the ledger's size when not given). fee: the pool's fee a side in % (the trade's venue, pool_fee); the
+    ledger's allowance cfg["fee_pct"] when not given."""
     usd = usd or cfg["usd"]
-    c0 = cost_pct(liq_in, usd, cfg["fee_pct"], cfg.get("tx_usd", 0.0)) / 100
-    c1 = cost_pct(liq_out, usd, cfg["fee_pct"], cfg.get("tx_usd", 0.0)) / 100
+    fee = cfg["fee_pct"] if fee is None else fee
+    c0 = cost_pct(liq_in, usd, fee, cfg.get("tx_usd", 0.0)) / 100
+    c1 = cost_pct(liq_out, usd, fee, cfg.get("tx_usd", 0.0)) / 100
     return (x * (1 - c0) * (1 - c1) - 1) * 100
+
+
+def pool_fee(dex, mcap_usd, sol_usd, cfg, tiers=None, venues=None):
+    """The pool's fee a side in % for a coin trading on `dex` (DEX Screener's or GeckoTerminal's id): PumpSwap's step
+    for the coin's market cap in SOL (config.PUMPSWAP_FEES), a fixed published rate (config.VENUE_FEES), or the
+    ledger's allowance cfg["fee_pct"] where the venue's rate is not fixed or not known. One rate serves both sides of a
+    trade: PumpSwap's steps are wide enough that a trade rarely crosses one."""
+    tiers = C.PUMPSWAP_FEES if tiers is None else tiers
+    venues = C.VENUE_FEES if venues is None else venues
+    d = (dex or "").lower()
+    if d == "pumpswap":
+        sol = sol_usd if sol_usd and sol_usd > 0 else cfg.get("sol_usd") or 0
+        m = (mcap_usd or 0) / sol if sol else 0
+        fee = tiers[0][1]
+        for lo, v in tiers:
+            if m >= lo:
+                fee = v
+        return fee
+    if d in venues:
+        return venues[d]
+    return cfg["fee_pct"]
+
+
+def venue_guess(mint, dex=None):
+    """The venue of a coin whose record lost it (a coin that left the screener): the recorded one when there is one,
+    else what its address says (pump.fun coins end in "pump" and graduate to PumpSwap; LetsBonk's in "bonk" graduate
+    to Raydium), else unknown."""
+    if dex:
+        return dex
+    m = mint or ""
+    return "pumpswap" if m.endswith("pump") else "raydium" if m.endswith("bonk") else ""
+
+
+def trade_fee(pos, cfg):
+    """A trade's fee a side: its own (recorded at entry from its venue, f["fee"]), else the ledger's allowance."""
+    v = pos.get("fee")
+    if v is None:
+        v = (pos.get("f") or {}).get("fee")
+    return cfg["fee_pct"] if v is None else v
+
+
+def jump_check(prev, price, liq, cfg):
+    """The price check before entry: (price ratio, liquidity ratio) when a reading is out of line with the coin's
+    previous ones, else None. prev: its earlier readings as path rows (ts, state, price, liq, ...), oldest first; the
+    last three count, through their medians. Out of line: the price check_price_x times (or 1/check_price_x of) the
+    median with the liquidity moved the same way by check_liq_x or more. A real move passes once later readings carry
+    the new level into the median; a bad reading never does."""
+    pts = [(r[2], r[3]) for r in prev if r[2]][-3:]
+    if not pts or not price or not liq:
+        return None
+    liqs = [l for _p, l in pts if l]
+    if not liqs:
+        return None
+    pr = price / statistics.median(p for p, _l in pts)
+    lr = liq / statistics.median(liqs)
+    px, lx = cfg["check_price_x"], cfg["check_liq_x"]
+    if (pr >= px and lr >= lx) or (pr <= 1 / px and lr <= 1 / lx):
+        return pr, lr
+    return None
 
 
 def net_of(sig, o, cfg, usd=None):
     """A recorded result [net, hours, reason, ts, price, exit liquidity] priced again, at another position size or
     other costs: from the entry and exit prices and the pool's liquidity at each end (the entry's when the exit's was
-    not recorded). None when the record has no price."""
+    not recorded), at the trade's own fee. None when the record has no price."""
     if not o or len(o) < 5 or not o[4] or not sig.get("in_price"):
         return None
     liq_out = o[5] if len(o) > 5 and o[5] else sig.get("in_liq")
-    return net_ret(o[4] / sig["in_price"], sig.get("in_liq"), liq_out, cfg, usd)
+    return net_ret(o[4] / sig["in_price"], sig.get("in_liq"), liq_out, cfg, usd, trade_fee(sig, cfg))
 
 
 def exit_label(p):
@@ -208,7 +269,7 @@ def step(pol, pos, st, price, liq, c1h, now, cfg, guard=None, sell=False, tick=F
     fill = price
     if why == "target":
         fill = min(price, pos["in_price"] * (1 + pol["tp"] / 100))
-    return (net_ret(fill / pos["in_price"], pos["in_liq"], liq, cfg), held, why, fill, price)
+    return (net_ret(fill / pos["in_price"], pos["in_liq"], liq, cfg, fee=trade_fee(pos, cfg)), held, why, fill, price)
 
 
 def levels(pol, pos, peak):
@@ -264,7 +325,7 @@ def advance(sig, obs, now, policies, cfg, tick=False):
     else:
         miss, price, liq, c1h = 0, obs["price"], obs.get("liq"), obs.get("c1h")
         lp, ll = price, liq if liq is not None else ll
-    pos = {"in_ts": sig["in_ts"], "in_price": sig["in_price"], "in_liq": sig["in_liq"]}
+    pos = {"in_ts": sig["in_ts"], "in_price": sig["in_price"], "in_liq": sig["in_liq"], "fee": trade_fee(sig, cfg)}
     xm = (obs or {}).get("xm") or {}
     for pid in list(st):
         pol = policies.get(pid)
@@ -318,7 +379,7 @@ def backtest(path, rule, pol, cfg, t_lo=None, t_hi=None):
                 break
             if not fires(rule, f):
                 continue
-            pos, s, res = {"in_ts": ts, "in_price": price, "in_liq": liq}, new_state(price), None
+            pos, s, res = {"in_ts": ts, "in_price": price, "in_liq": liq, "fee": f.get("fee")}, new_state(price), None
             for tj, sj, pj, lj, cj, _fj in rows[i:]:
                 if not pj:
                     continue
@@ -426,7 +487,7 @@ def outcomes(path, cfg, hours=4, tol_h=1.0):
             if j >= n or rows[j][0] > ts + (hours + tol_h) * H or not rows[j][2]:
                 continue
             x = rows[j][2] / price
-            out.append((ts, mint, f, net_ret(x, liq, rows[j][3], cfg), (x - 1) * 100))
+            out.append((ts, mint, f, net_ret(x, liq, rows[j][3], cfg, fee=f.get("fee")), (x - 1) * 100))
     return out
 
 
@@ -696,7 +757,7 @@ def backtest_entries(path, rules, exits, cfg):
         if i is None:
             continue
         ts, _s, p0, l0 = rows[i][:4]
-        pos = {"in_ts": ts, "in_price": p0, "in_liq": l0}
+        pos = {"in_ts": ts, "in_price": p0, "in_liq": l0, "fee": (rows[i][5] or {}).get("fee")}
         for pid, pol in exits.items():
             s = new_state(p0)
             for tj, sj, pj, lj, cj, _f in rows[i + 1:]:

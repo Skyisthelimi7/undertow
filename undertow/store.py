@@ -287,6 +287,27 @@ class Store:
     def set_sig_out(self, sid, out):
         self.db.execute("UPDATE tsig SET out=? WHERE id=?", (json.dumps(out, separators=(",", ":")), sid))
 
+    def set_sig_f(self, sid, f):
+        self.db.execute("UPDATE tsig SET f=? WHERE id=?", (json.dumps(f, separators=(",", ":")), sid))
+
+    def venue_map(self):
+        """{mint: the DEX of its main pool, as recorded (often empty for a coin that left the screener)}."""
+        return {r[0]: r[1] or "" for r in self.db.execute("SELECT mint, dex FROM tokens")}
+
+    def backfill_path_fees(self, fee_of):
+        """Give every path reading with variables but no fee its pool's fee a side: fee_of(mint, variables) -> %.
+        Returns how many readings were given one."""
+        rows = self.db.execute("SELECT rowid, mint, f FROM tpath WHERE f IS NOT NULL AND f NOT LIKE '%\"fee\":%'").fetchall()
+        n = 0
+        for rowid, mint, f in rows:
+            d = json.loads(f) if f else None
+            if not d or d.get("fee") is not None:
+                continue
+            d["fee"] = fee_of(mint, d)
+            self.db.execute("UPDATE tpath SET f=? WHERE rowid=?", (json.dumps(d, separators=(",", ":")), rowid))
+            n += 1
+        return n
+
     def open_sigs(self):
         return [self._sig(r) for r in self.db.execute("SELECT * FROM tsig WHERE done=0")]
 

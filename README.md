@@ -219,9 +219,9 @@ The Buy & sell tab is a paper ledger, not advice. Every scan, each coin that pas
 bench of entry rules (`ENTRY_POOL` in the config, `undertow/trade.py`). A rule that fires opens a paper trade once the
 scan's gates are known, at the coin's latest minute price (the scan's own price reading is 10 to 15 minutes older
 than the gates the decision relied on); every later price reading steps the trade through every exit policy on the
-bench (`EXIT_POOL`), so one entry has a result under each way of selling it. Results are on a $100 position after a
-1% fee allowance a side, a $0.05 network fee a transaction and price impact from the pool's liquidity (`TRADE` in the
-config). Each scan reads prices three ways, in time order: its own reading of every price, which steps every open
+bench (`EXIT_POOL`), so one entry has a result under each way of selling it. Results are on a $100 position after the
+coin's own pool fee a side, a $0.05 network fee a transaction and price impact from the pool's liquidity (`TRADE`,
+`PUMPSWAP_FEES` and `VENUE_FEES` in the config; see *Fees* below). Each scan reads prices three ways, in time order: its own reading of every price, which steps every open
 trade at once; one reading a minute while it works out the gates (next section), which steps them again; and, once
 the gates are known, the scan's decisions (a structure gate failed, an exit model says sell), carried out at each
 trade's latest price. A stop fills at the first price read at or past its level, within a minute while a scan runs.
@@ -233,11 +233,30 @@ trades), the leading model's 120 trades came to -$0.9 a trade as a +10% order wo
 booked from the readings and -$2.5 at the target. Of its 15 take-profits read 10 or more points past the target, 10
 traded that high within a minute, 4 only 6 to 13 minutes after the reading, and 1 never.
 
+* **Fees (since 2 November 2026).** Each trade pays its own pool's fee a side, recorded at entry from the venue the
+  scan reads for the coin: on PumpSwap, pump.fun's dynamic fee by market cap in SOL (1.25% below 420 SOL, 1.20% from
+  420 SOL, stepping down to 0.30% from 98,240 SOL: LP 0.20%, protocol 0.05% and a creator fee from 0.95% to 0.05%);
+  on Raydium its published 0.25% (AMM v4, the default CPMM and CLMM tiers, LaunchLab's graduates); and the old 1%
+  allowance where a pool's fee is not fixed (Meteora's dynamic fees, Orca's tiers) or the venue is unknown. Every
+  trade and path reading recorded before then was given its venue's fee (a coin that left the screener by its address:
+  pump.fun's end in "pump") and priced again, and backtests and training labels use the same fees. It changed little:
+  at a SOL price near $95 most coins traded sit under 4,420 SOL ($420k), where PumpSwap charges 1.05% to 1.25%, so the
+  average fee a side came to 0.97% and the ledger's results moved from -5.66% to -5.60% a trade (20 Oct to 2 Nov).
+  The losses are not the fee allowance's doing. A trading bot would add about 1% a side; this leaves it out.
+
+* **Price check before entry (since 2 November 2026).** No buy on a reading out of line with the coin's last ones: a
+  price 1.5 times (or two thirds) the median of its last three readings in 90 minutes, with its liquidity moved the
+  same way by 1.3 times, waits until later readings confirm the level. One scan read Jimothy (107 days old, a $335k
+  pool) at 3 times its price and twice its liquidity; 15 trades bought and "lost" 67% at the next, true reading. From
+  27 October to 2 November the check would have held back 624 of 42,597 trades, catching 102 of the 107 opened on a
+  reading out of line with the readings either side; the other 522 it held back lost 11% each against 5.5% for the
+  rest, since a coin that has just jumped, or whose pool has just shrunk with its price, is a poor buy anyway.
+
 * **Bet size.** The ledger was kept at $500 a trade until 22 October 2026, then at $100, with every recorded result
   priced again from its entry and exit prices. Price impact is the one cost a smaller position shrinks: on a $50k pool
-  it is about 2% a side at $500 and 0.4% at $100. Fees are a share of the position, so they do not shrink: PumpSwap
-  charges 0.25% plus a creator fee that falls with market cap (0.95% under $300k), other pools 0.25% to 1%, and a
-  trading bot adds about 1% a side. The network fee is fixed, so it weighs more on a small bet (0.2% a side at $25).
+  it is about 2% a side at $500 and 0.4% at $100. Fees are a share of the position, so they do not shrink (see
+  *Fees*), and a trading bot adds about 1% a side. The network fee is fixed, so it weighs more on a small bet (0.2% a
+  side at $25).
   The tab's "Bet size and costs" table prices the same closed trades at $25, $100 and $500, overall and by pool
   liquidity. Many small bets make the average more certain; they do not make it positive.
 
@@ -410,6 +429,18 @@ pool was pulled cost $80 each, and the 29% that ran out the 8 hours $22 each.
   paper trade, from every rule and model, so each one's record with the filter is its own trades without the ones the
   filter would have kept out. The Models tab shows the walk-forward test, every model's test picks with the filter,
   and the forward split of every model's and rule's trades into kept and kept out.
+  *Older coins (2 November 2026).* The first week of forward trades showed what the filter misses: rugs on coins past
+  their first day, which it scores far below its cut (on 1 November 113 of 201 pulled trades were on coins it rated
+  safe, 76 of them on one 77-hour-old coin). Nearly every one of those "rugs" is a dump, the price collapsing with the
+  pool, not a pulled pool. On the 2 November path (16,787 readings, 553 rugs, 41 of them on coins 3 days or older),
+  walk-forward: for coins a week or older the forest ranks rugs well (AUC 0.94 within that group, 0.83 on their real
+  pulls since 27 October) but kept out 1% of their readings and caught 1 of 14 rugs; for coins 1 to 7 days old nothing
+  recorded ranks them (AUC 0.33 to 0.51; a forest of their own and weighting their rugs did no better). So a coin a
+  week or older is now also kept out when its score is in the top 10% of what the training data's week-old coins
+  scored (`MODELS["rug_old_h"]`, `["rug_old_share"]`): 13.5% of their test readings, 13 of 14 rugs caught, kept -2.8%
+  against -7.6% kept out; on the live record it would have caught 8 of 11 pulls for 9% of their coin-hours. Coins 1 to
+  7 days old keep no cut of their own: one there kept out good trades with the bad. Trades record the filter's version
+  (`rug_v`), and the tab shows the forward split since the change apart from the one since 27 October.
 * **Win-or-lose against return** (`PAIRS`): every win-or-lose model has a twin trained on the trade's return itself, on
   the same variables and samples: logistic regression against ridge regression, the random forest, gradient
   boosting, XGBoost and LightGBM against their return versions, and since 27 October the neural network and the LSTM

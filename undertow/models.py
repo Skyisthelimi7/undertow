@@ -142,7 +142,7 @@ def simulate(rows, i, pol, cfg, sell_at=None):
     liquidity pull sell at once). sell_at(j, peak_before) -> True lets an exit model sell at scan j. Returns
     (net %, hours held, reason, index of the closing scan) or None if the path ends first."""
     ts, _s, price, liq = rows[i][:4]
-    pos, s = {"in_ts": ts, "in_price": price, "in_liq": liq}, TRD.new_state(price)
+    pos, s = {"in_ts": ts, "in_price": price, "in_liq": liq, "fee": (rows[i][5] or {}).get("fee")}, TRD.new_state(price)
     for j in range(i + 1, len(rows)):
         tj, sj, pj, lj, cj, _fj = rows[j]
         if not pj:
@@ -204,7 +204,7 @@ def exit_samples(path, samples, cfg, every, cap, seed=0):
             if cnt % every:
                 continue
             out.append({"k": k, "mint": s["mint"], "ts": tj, "ts0": ts0, "x": exit_row(fj, cj, state),
-                        "y": int(TRD.net_ret(pj / p0, l0, lj, cfg) > s["net"])})
+                        "y": int(TRD.net_ret(pj / p0, l0, lj, cfg, fee=(rows[s["i"]][5] or {}).get("fee")) > s["net"])})
     if len(out) > cap:
         out = sorted(random.Random(seed).sample(out, cap), key=lambda e: e["ts"])
     return out
@@ -537,12 +537,46 @@ def fit_rug(X, y):
     return Fitted("cls", mdl, cols)
 
 
+RUG_AGES = (("under 1 day", 0, 24), ("1 to 3 days", 24, 72), ("3 to 7 days", 72, 168), ("a week or more", 168, None))
+RUG_OLD_MIN = 50                             # older coins' training readings needed before their own cut is set
+
+
+def old_cut(scores, age_h, old_h, share):
+    """The score above which a coin at least old_h hours old is kept out: the top `share` of what coins that old
+    scored. None without old_h or with fewer than RUG_OLD_MIN of them."""
+    if not old_h or not share:
+        return None
+    o = np.asarray(age_h, float) >= old_h          # an unknown age (nan) never counts as old
+    if o.sum() < RUG_OLD_MIN:
+        return None
+    return float(np.quantile(np.asarray(scores, float)[o], 1 - share))
+
+
+def rug_by_age(y, p, flags, net, age_h):
+    """The walk-forward test by the coin's age: readings, rugs, AUC within the group, the share kept out, rugs caught,
+    and the average after costs of the readings kept and kept out."""
+    out = []
+    for name, lo, hi in RUG_AGES:
+        m = (age_h >= lo) & ((age_h < hi) if hi is not None else True)
+        if not m.any():
+            continue
+        r = {"label": name, "lo": lo, "hi": hi, "n": int(m.sum()), "rugs": int(y[m].sum()),
+             "auc": auc(y[m], p[m]) if 0 < y[m].sum() < m.sum() else None, "out": float(flags[m].mean()),
+             "caught": float(flags[m & (y == 1)].mean()) if (m & (y == 1)).any() else None,
+             "net_kept": float(net[m & ~flags].mean()) if (m & ~flags).any() else None,
+             "net_out": float(net[m & flags].mean()) if (m & flags).any() else None}
+        out.append(r)
+    return out
+
+
 def train_rug(path, samples, X, keys, ts, closed, net, mints, cfg, out_dir, log):
     """The rug model: a random forest on every variable, scoring how likely a coin passing every gate is to lose half
     its liquidity within rug_h hours. Walk-forward on the entry models' test windows, each fold trained only on samples
     whose label window had closed before the window opened; it keeps a coin out when its score is in the top rug_share
-    of what its own training data scored. Returns (summary record, flags, scored, labels): flags marks the test samples
-    it would have kept out, scored the ones it scored."""
+    of what its own training data scored, or, for a coin at least rug_old_h hours old, in the top rug_old_share of what
+    the training data's coins that old scored (the global cut almost never reaches them, though the forest ranks them
+    well). Returns (summary record, flags, scored, labels): flags marks the test samples it would have kept out, scored
+    the ones it scored."""
     y = rug_labels(path, samples, cfg["rug_h"], cfg["rug_liq"])
     n = len(samples)
     flags, scored, oos = np.zeros(n, bool), np.zeros(n, bool), np.full(n, np.nan)
@@ -550,6 +584,8 @@ def train_rug(path, samples, X, keys, ts, closed, net, mints, cfg, out_dir, log)
     if y.sum() < 20:
         log(f"rug model: collecting, {int(y.sum())} rugs in the history so far")
         return {"status": f"collecting: {int(y.sum())} rugs in the history so far", "label": label}, flags, scored, y
+    age_h = np.array([float(s["f"]["age"]) if _num((s["f"] or {}).get("age")) else np.nan for s in samples])
+    old_h, old_q = cfg.get("rug_old_h"), cfg.get("rug_old_share")
     t0 = time.time()
     tr_auc = []
     for tr, te in folds(ts, np.maximum(closed, ts + cfg["rug_h"] * H), cfg):
@@ -559,10 +595,14 @@ def train_rug(path, samples, X, keys, ts, closed, net, mints, cfg, out_dir, log)
         p_tr, p_te = fm.score(X[tr]), fm.score(X[te])
         oos[te], scored[te] = p_te, True
         flags[te] = p_te >= np.quantile(p_tr, 1 - cfg["rug_share"])
+        cut = old_cut(p_tr, age_h[tr], old_h, old_q)
+        if cut is not None:
+            flags[te] |= (age_h[te] >= old_h) & (p_te >= cut)
         a = auc(y[tr], p_tr)
         if a is not None:
             tr_auc.append(a)
     rec = {"slug": "rf", "algo": "Random forest", "label": label, "share": cfg["rug_share"], "hours": cfg["rug_h"],
+           "old_h": old_h, "old_share": old_q,
            "samples": n, "rugs": int(y.sum()), "base": float(y.mean()), "n_vars": len(keys), "status": "ok"}
     if scored.sum() >= 50 and len(set(y[scored].tolist())) > 1:
         from sklearn.metrics import average_precision_score
@@ -577,14 +617,20 @@ def train_rug(path, samples, X, keys, ts, closed, net, mints, cfg, out_dir, log)
                    deciles=[{"rug": float(ys[(ps >= dec[k]) & (ps <= dec[k + 1])].mean()),
                              "net": float(ns[(ps >= dec[k]) & (ps <= dec[k + 1])].mean())} for k in range(10)])
         rec["gap"] = rec["train_auc"] - rec["auc"] if rec.get("train_auc") is not None and rec.get("auc") is not None else None
+        rec["ages"] = rug_by_age(ys, ps, fs, ns, age_h[scored])
     fm = fit_rug(X, y)
-    rec["thr"] = float(np.quantile(fm.score(X), 1 - cfg["rug_share"]))
+    sc = fm.score(X)
+    rec["thr"] = float(np.quantile(sc, 1 - cfg["rug_share"]))
+    rec["thr_old"] = old_cut(sc, age_h, old_h, old_q)
     rec.update(keys=keys, leading=leading(fm, keys), file="rug.pkl", seconds=round(time.time() - t0, 1))
     with open(os.path.join(out_dir, rec["file"]), "wb") as fh:
         pickle.dump(fm, fh, protocol=pickle.HIGHEST_PROTOCOL)
+    old = next((a for a in rec.get("ages") or [] if a["lo"] == old_h), None)
     log(f"rug model: {rec['rugs']} rugs in {n} samples ({rec['base']:.1%}); test AUC {rec.get('auc') or 0:.3f}, keeps out "
         f"{rec.get('flag_share') or 0:.0%} of test readings and {rec.get('caught') or 0:.0%} of their rugs; after costs "
-        f"kept {rec.get('net_kept') or 0:+.2f}% vs kept out {rec.get('net_flagged') or 0:+.2f}%")
+        f"kept {rec.get('net_kept') or 0:+.2f}% vs kept out {rec.get('net_flagged') or 0:+.2f}%"
+        + (f"; coins {old_h:g}h+: AUC {old['auc'] or 0:.3f}, {old['out']:.0%} kept out, {old['caught'] or 0:.0%} of {old['rugs']} "
+           f"rugs caught" if old else ""))
     return rec, flags, scored, y
 
 
@@ -796,8 +842,15 @@ class Bank:
                 self.errors.append(f"{mid}: {type(e).__name__}")
         return out
 
+    @property
+    def rug_version(self):
+        """1: the global cut only (27 Oct 2026); 2: with the cut for older coins (2 Nov 2026)."""
+        return 2 if self.rug and self.rug[0].get("thr_old") is not None else 1
+
     def rug_scores(self, feats):
-        """{mint: (score, kept out)} from the rug model for the given coins' variables; {} without a fresh rug model."""
+        """{mint: (score, kept out)} from the rug model for the given coins' variables; {} without a fresh rug model.
+        Kept out: the score at or above the global cut, or, for a coin at least old_h hours old, at or above the cut
+        for coins that old."""
         if not self.rug or not self.fresh or not feats:
             return {}
         meta, fm = self.rug
@@ -807,7 +860,13 @@ class Bank:
         except Exception as e:
             self.errors.append(f"rug: {type(e).__name__}")
             return {}
-        return {mt: (float(v), bool(v >= meta["thr"])) for mt, v in zip(mints, p)}
+        thr_old, old_h = meta.get("thr_old"), meta.get("old_h")
+        out = {}
+        for mt, v in zip(mints, p):
+            age = (feats[mt] or {}).get("age")
+            old = thr_old is not None and old_h and _num(age) and age >= old_h
+            out[mt] = (float(v), bool(v >= meta["thr"] or (old and v >= thr_old)))
+        return out
 
     def fired(self, scores, feats, now, share):
         """{model id: {mint: score}} for the coins each model would buy: a score at or above its threshold (and the

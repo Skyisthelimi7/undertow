@@ -455,6 +455,13 @@ class RunningPnL(unittest.TestCase):
         self.assertEqual(set(g), {"models", "random", "rules"})
         self.assertEqual(g["random"]["out"]["n"], 1)
         self.assertEqual(g["models"]["out"]["total"], -80.0)                     # the random control is kept apart
+        self.assertEqual(SC.filter_groups(got, rules, "filt2"), {})              # no trade under the older-coin cut yet
+        # trades the filter called with its cut for older coins (rug_v 2) count in both splits
+        late = sig("m:a", [-60.0, 1.0, "liquidity pulled", 4 * H, 0.4], hi=1)
+        late["f"]["rug_v"] = 2
+        got2 = SC.pnl_by_rule(sigs + [late], [], {}, rules, cfg, 10 * H)["rules"]["m:a"]
+        self.assertEqual((got2["filt"]["out"]["n"], got2["filt2"]["out"]["n"], got2["filt2"]["kept"]["n"]), (2, 1, 0))
+        self.assertEqual(SC.filter_groups({"m:a": got2}, rules, "filt2")["models"]["out"]["total"], -60.0)
 
     def test_a_pair_is_compared_over_the_hours_both_were_trading(self):
         cfg = {**C.TRADE, "usd": 100}
@@ -561,6 +568,105 @@ class Sizes(unittest.TestCase):
         deep = next(b for b in scan["buckets"] if b["label"] == "$100k or more")
         self.assertGreater(deep["net"]["500"], thin["net"]["500"])          # impact: what a deep pool spares
         self.assertEqual(next(g for g in z["groups"] if g["id"] == "random")["n"], 0)
+
+
+class VenueFees(unittest.TestCase):
+    """Each trade pays its own pool's fee (trade.pool_fee): PumpSwap's by market cap in SOL, Raydium's fixed rate,
+    the allowance elsewhere; a trade recorded before then gets it from its venue when the ledger is priced again."""
+
+    def test_pumpswap_steps_by_market_cap_in_sol(self):
+        cfg = C.TRADE
+        self.assertEqual(T.pool_fee("pumpswap", 30_000, 100, cfg), 1.25)        # 300 SOL: under the first step
+        self.assertEqual(T.pool_fee("pumpswap", 42_000, 100, cfg), 1.20)        # 420 SOL
+        self.assertEqual(T.pool_fee("pumpswap", 1_000_000, 100, cfg), 0.95)     # 10,000 SOL
+        self.assertEqual(T.pool_fee("pumpswap", 5_000_000, 100, cfg), 0.55)     # 50,000 SOL
+        self.assertEqual(T.pool_fee("pumpswap", 50_000_000, 100, cfg), 0.30)    # past 98,240 SOL: the floor
+        self.assertEqual(T.pool_fee("PumpSwap", 30_000, None, {**cfg, "sol_usd": 50}), 1.20)   # 600 SOL at the default
+        self.assertEqual(T.pool_fee("raydium", 1e6, 100, cfg), 0.25)
+        self.assertEqual(T.pool_fee("meteora", 1e6, 100, cfg), cfg["fee_pct"])  # dynamic fees: the allowance
+        self.assertEqual(T.pool_fee(None, 1e6, 100, cfg), cfg["fee_pct"])
+        self.assertEqual(T.venue_guess("Abcpump"), "pumpswap")
+        self.assertEqual(T.venue_guess("Abcbonk"), "raydium")
+        self.assertEqual(T.venue_guess("Abcpump", "meteora"), "meteora")        # the recorded venue wins
+        self.assertEqual(T.venue_guess("Abc"), "")
+
+    def test_a_trade_is_stepped_and_priced_at_its_own_fee(self):
+        cfg = C.TRADE
+        pol = {"id": "tp10_8h", "tp": 10, "max_h": 8}
+        base = {"in_ts": 0.0, "in_price": 1.0, "in_liq": 1e9, "miss": 0, "out": {}, "st": T.start_states(1.0, ["tp10_8h"])}
+        cheap = {**base, "f": {"fee": 0.25}, "st": T.start_states(1.0, ["tp10_8h"])}
+        flat = {**base, "f": {}, "st": T.start_states(1.0, ["tp10_8h"])}
+        o_cheap = T.advance(cheap, {"price": 1.2, "liq": 1e9}, 900.0, {"tp10_8h": pol}, cfg)[0]["tp10_8h"]
+        o_flat = T.advance(flat, {"price": 1.2, "liq": 1e9}, 900.0, {"tp10_8h": pol}, cfg)[0]["tp10_8h"]
+        self.assertAlmostEqual(o_cheap[0], T.net_ret(1.1, 1e9, 1e9, cfg, fee=0.25), places=2)
+        self.assertAlmostEqual(o_flat[0], T.net_ret(1.1, 1e9, 1e9, cfg), places=2)
+        self.assertAlmostEqual(o_cheap[0] - o_flat[0], 1.1 * (0.9975 ** 2 - 0.99 ** 2) * 100, places=1)
+        self.assertAlmostEqual(T.net_of(cheap, o_cheap, cfg), o_cheap[0], places=2)
+
+    def test_repricing_gives_old_trades_their_venues_fee(self):
+        st = Store(os.path.join(tempfile.mkdtemp(), "t.db"))
+        st.upsert_seen({"mint": "Rayd1", "pool": "p", "dex": "raydium", "name": "R"}, 1.0)
+        sid = st.add_sig("r", "Rayd1", "R", 10 * H, 1.0, 1e9, 1e6, {"ru6": 1.0}, "tp10_8h", False, {})
+        st.update_sig(sid, {"tp10_8h": [9.0, 1.0, "target", 11 * H, 1.1, 1e9]}, {}, 0, 1.1, 1e9, True, 11 * H)
+        sid2 = st.add_sig("r", "Old2pump", "P", 10 * H, 1.0, 1e9, 30_000, {"ru6": 1.0}, "tp10_8h", False, {})
+        st.add_tpath([(10 * H, "Rayd1", "I", 1.0, 1e9, 0.0, {"mc": 1e6}), (10 * H, "Old2pump", "I", 1.0, 1e9, 0.0, {"mc": 3e4})])
+        st.set_meta("sol_usd", "100")
+        st.set_meta("ledger_costs", "100|1.0|0.05|tp-at-target")              # priced under the flat allowance
+        st.commit()
+        n = SC.reprice_ledger(st, C.TRADE, {e["id"]: e for e in C.EXIT_POOL})
+        self.assertEqual(n, 1)
+        by = {s["id"]: s for s in st.sigs()}
+        self.assertEqual(by[sid]["f"]["fee"], 0.25)
+        self.assertEqual(by[sid2]["f"]["fee"], 1.25)                            # a pump.fun coin at 300 SOL
+        self.assertAlmostEqual(by[sid]["out"]["tp10_8h"][0], T.net_ret(1.1, 1e9, 1e9, C.TRADE, fee=0.25), places=2)
+        fees = {m: rows[0][5]["fee"] for m, rows in st.tpath(0).items()}
+        self.assertEqual(fees, {"Rayd1": 0.25, "Old2pump": 1.25})              # the path's readings too
+        self.assertEqual(SC.reprice_ledger(st, C.TRADE, {e["id"]: e for e in C.EXIT_POOL}), 0)   # once
+        st.close()
+
+
+class PriceCheck(unittest.TestCase):
+    """No buy on a reading out of line with the coin's last ones (trade.jump_check)."""
+
+    def rows(self, *pl):
+        return [(k * 900.0, "I", p, l, 0.0, None) for k, (p, l) in enumerate(pl)]
+
+    def test_a_jump_in_price_and_liquidity_is_held_back(self):
+        cfg = C.TRADE
+        prev = self.rows((1.0, 100_000), (1.02, 101_000), (0.99, 99_000))
+        self.assertEqual(T.jump_check(prev, 3.0, 200_000, cfg), (3.0, 200_000 / 100_000))   # Jimothy: 3x, 2x
+        self.assertIsNone(T.jump_check(prev, 3.0, 110_000, cfg))              # the price alone: a pump, not a bad quote
+        self.assertIsNotNone(T.jump_check(prev, 0.4, 60_000, cfg))             # down: a crash with its pool, or a bad quote
+        self.assertIsNone(T.jump_check(prev, 1.1, 105_000, cfg))
+        self.assertIsNone(T.jump_check([], 3.0, 200_000, cfg))                 # nothing to compare with
+        glitch = self.rows((1.0, 100_000), (1.0, 100_000), (3.0, 200_000))
+        self.assertIsNone(T.jump_check(glitch, 1.0, 100_000, cfg))             # the median ignores one bad reading before
+        moved = self.rows((1.0, 100_000), (2.0, 160_000), (2.0, 160_000))
+        self.assertIsNone(T.jump_check(moved, 2.0, 160_000, cfg))              # a real move passes once readings carry it
+
+    def test_the_ledger_skips_a_coin_read_out_of_line(self):
+        st = Store(os.path.join(tempfile.mkdtemp(), "t.db"))
+        feat = SC.trade_features
+        SC.trade_features = lambda st_, r, now_, regime: {"ru6": 5.0, "liq": r["d"]["liq"], "mc": r["d"]["mcap"]}
+        try:
+            t0 = 1_000_000.0
+            for k in range(3):                                                  # three ordinary scans of A and B
+                rows = [fake_row("A", 1.0, liq=200_000), fake_row("B", 1.0, liq=200_000)]
+                SC.trade_step(st, rows, {m: {"price": 1.0, "liq": 200_000} for m in "AB"}, t0 + k * 900, {})
+            before = {s["mint"] for s in st.sigs()}
+            st.db.execute("DELETE FROM tsig")
+            st.commit()
+            now = t0 + 3 * 900
+            rows = [fake_row("A", 3.0, liq=400_000), fake_row("B", 1.0, liq=200_000)]
+            SC.trade_step(st, rows, {"A": {"price": 3.0, "liq": 400_000}, "B": {"price": 1.0, "liq": 200_000}}, now, {})
+            self.assertEqual(before, {"A", "B"})
+            self.assertEqual({s["mint"] for s in st.sigs()}, {"B"})               # A's 3x reading waits
+            pc = json.loads(st.get_meta("price_check"))
+            self.assertEqual((pc["n"], pc["last"][0]["sym"]), (1, "A"))
+            self.assertTrue(all(s["f"].get("fee") == C.TRADE["fee_pct"] for s in st.sigs()))   # no venue: the allowance
+        finally:
+            SC.trade_features = feat
+            st.close()
 
 
 if __name__ == "__main__":

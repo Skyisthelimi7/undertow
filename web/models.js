@@ -156,8 +156,9 @@ function rugSec(){
   var R=M.rug,G=M.rug_groups||{};if(!R)return '';
   if(R.error)return sec('Rug filter','<p class="empty tr-dn">The rug model failed to train: '+esc(R.error)+'</p>','md-rug');
   if(R.status!=='ok')return sec('Rug filter','<p class="empty">'+esc(R.status||'Waiting for the next training run')+'.</p>','md-rug');
-  var c=M.cfg||{},sh=R.share||0.15;
-  var body='<p class="trk-note">A random forest on every variable, trained with the entry models on the same samples, scores how likely a coin that passes every gate is to have its pool pulled: '+esc(R.label||'')+' (a pulled pool, or a collapse that takes half its value with it). Its filter keeps a coin out when the score is in the top '+pc(sh*100,0)+' of what its own training data scored. Walk-forward, each fold trained only on readings whose 8 hours had passed before the test window opened. It mostly reads a coin’s age: one a few hours old is the one likely to collapse. Nothing is kept out of the records: every model and rule still trades as before, its score is recorded on every trade, and each model’s trades the filter would have let through form its record with the filter, the same trades without the ones it would have kept out.</p>';
+  var c=M.cfg||{},sh=R.share||0.15,oh=R.old_h,oq=R.old_share;
+  var oldTxt=oh&&R.thr_old!=null?' A coin at least '+(oh>=24?Math.round(oh/24)+' days':Math.round(oh)+' hours')+' old is also kept out when its score is in the top '+pc(oq*100,0)+' of what the training data’s coins that old scored (since 2 Nov): the forest ranks those older coins’ rugs well, but their scores sit far below the global cut, so it almost never reached them.':'';
+  var body='<p class="trk-note">A random forest on every variable, trained with the entry models on the same samples, scores how likely a coin that passes every gate is to have its pool pulled: '+esc(R.label||'')+' (a pulled pool, or a collapse that takes half its value with it; past a coin’s first day nearly every one is a dump, the price collapsing with the pool). Its filter keeps a coin out when the score is in the top '+pc(sh*100,0)+' of what its own training data scored.'+oldTxt+' Walk-forward, each fold trained only on readings whose 8 hours had passed before the test window opened. It mostly reads a coin’s age: one a few hours old is the one likely to collapse; for coins between 1 and 7 days old nothing recorded ranks their rugs, so they have no cut of their own. Nothing is kept out of the records: every model and rule still trades as before, its score is recorded on every trade, and each model’s trades the filter would have let through form its record with the filter, the same trades without the ones it would have kept out.</p>';
   body+='<div class="kpis">'+kpi('Rugs in the history',int(R.rugs||0),share(R.base,1)+' of '+int(R.samples||0)+' readings')
     +kpi('AUC (test)',f3(R.auc),'training '+f3(R.train_auc)+' · average precision '+f3(R.ap)+' against '+share(R.base_test,1)+' by chance')
     +kpi('Kept out (test)',share(R.flag_share),'catching '+share(R.caught)+' of the rugs')
@@ -167,11 +168,18 @@ function rugSec(){
     body+='<h3 class="sub-h">By rug score, lowest tenth first (test readings)</h3>'+table([''].concat(R.deciles.map(function(_d,i){return (i+1)+'';})),[
       '<tr><td class="l">Pulled within 8 hours</td>'+R.deciles.map(function(d){return '<td>'+share(d.rug,1)+'</td>';}).join('')+'</tr>',
       '<tr><td class="l">Average after costs</td>'+R.deciles.map(function(d){return '<td class="'+(d.net>0?'tr-up':'tr-dn')+'">'+n1(d.net)+'</td>';}).join('')+'</tr>'],'');}
+  if((R.ages||[]).length){
+    body+='<h3 class="sub-h">By the coin’s age (test readings)</h3>'+table(['Age','Readings','Rugs','AUC within','Kept out','Rugs caught','Kept: after costs','Kept out: after costs'],R.ages.map(function(a){
+      return '<tr><td class="l">'+esc(a.label)+'</td><td>'+int(a.n)+'</td><td>'+int(a.rugs)+'</td><td>'+(a.auc!=null?f3(a.auc):'–')+'</td><td>'+share(a.out,1)+'</td><td>'+(a.caught!=null?share(a.caught):'–')+'</td><td class="'+(a.net_kept>0?'tr-up':'tr-dn')+'">'+n2(a.net_kept)+'</td><td>'+(a.net_out!=null?n2(a.net_out):'–')+'</td></tr>';}),'cards')
+      +'<p class="fine">AUC within an age group: how well the score ranks that group’s rugs among themselves (0.5 is a coin toss). Few rugs past the first day, so read those rows as rough.</p>';}
   var lbl={models:'Every model',random:'Random control',rules:'Scan rules',quick:'Quick rules'};
-  var rows=['models','random','rules','quick'].filter(function(g){return G[g];}).map(function(g){var k=G[g].kept,o=G[g].out,nk=k.n+k.n_open,no=o.n+o.n_open;
+  var grpRows=function(G){return ['models','random','rules','quick'].filter(function(g){return G[g];}).map(function(g){var k=G[g].kept,o=G[g].out,nk=k.n+k.n_open,no=o.n+o.n_open;
     return '<tr><td class="l"><b>'+lbl[g]+'</b></td><td>'+int(nk)+'</td><td class="'+(k.total>0?'tr-up':'tr-dn')+'">'+dol(k.total)+'</td><td>'+(nk?dol(k.total/nk):'–')+'</td><td>'+(k.n?share(k.pulled/k.n,1):'–')+'</td>'
-      +'<td>'+int(no)+'</td><td class="'+(o.total>0?'tr-up':'tr-dn')+'">'+dol(o.total)+'</td><td>'+(no?dol(o.total/no):'–')+'</td><td>'+(o.n?share(o.pulled/o.n,1):'–')+'</td></tr>';});
-  body+='<h3 class="sub-h">Forward: paper trades since the filter started scoring</h3>'+(rows.length?table(['Who','Kept: trades','P/L','A trade','Pulled','Kept out: trades','P/L','A trade','Pulled'],rows,'cards')
+      +'<td>'+int(no)+'</td><td class="'+(o.total>0?'tr-up':'tr-dn')+'">'+dol(o.total)+'</td><td>'+(no?dol(o.total/no):'–')+'</td><td>'+(o.n?share(o.pulled/o.n,1):'–')+'</td></tr>';});};
+  var hd=['Who','Kept: trades','P/L','A trade','Pulled','Kept out: trades','P/L','A trade','Pulled'];
+  var rows2=grpRows(M.rug_groups_v2||{}),rows=grpRows(G);
+  if(rows2.length)body+='<h3 class="sub-h">Forward: paper trades since the cut for older coins (2 Nov)</h3>'+table(hd,rows2,'cards');
+  body+='<h3 class="sub-h">Forward: paper trades since the filter started scoring (27 Oct)</h3>'+(rows.length?table(hd,rows,'cards')
     :'<p class="empty">No trade has been scored yet: the scores start with the first scan after the rug model is trained.</p>');
   if((R.leading||[]).length)body+='<p class="fine">Leans on: '+R.leading.map(function(x){return esc(varLabel(x[0]))+' <span class="ip">'+Math.round(x[1]*100)+'%</span>';}).join(', ')+'. Each model’s picks in the walk-forward test with the filter, and its paper P/L with the filter, are in the entry models’ table below.</p>';
   return sec('Rug filter: keeping out coins likely to be pulled',body,'md-rug');

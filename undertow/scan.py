@@ -564,10 +564,12 @@ def update_outcomes(st, ds_all, now):
     return n
 
 
-def regime_of(rows, sol24):
-    """Market-wide numbers every observation carries: SOL's 24h change and the share of candidates rising over 1h."""
+def regime_of(rows, sol24, sol_usd=None):
+    """Market-wide numbers every observation carries: SOL's 24h change and the share of candidates rising over 1h,
+    with SOL's price (PumpSwap's fee steps are set in SOL)."""
     rising = [r for r in rows if (r["d"].get("chg") or {}).get("h1") is not None]
-    return {"sol24": sol24, "mkt1h": sum(1 for r in rising if r["d"]["chg"]["h1"] > 0) / len(rising) if rising else None}
+    return {"sol24": sol24, "mkt1h": sum(1 for r in rising if r["d"]["chg"]["h1"] > 0) / len(rising) if rising else None,
+            "sol_usd": sol_usd}
 
 
 def observe(st, rows, now, regime):
@@ -1119,6 +1121,49 @@ def exit_pool_of(bank):
 
 
 LEDGER_FILLS = "tp-at-target"                  # how sales fill (trade.step); a change prices the ledger again
+FEE_MODEL = "venue-v1"                          # how fees are set (trade.pool_fee); a change prices the ledger again
+
+
+def fee_summary(sigs, cfg):
+    """What the ledger's trades pay a side, for the page: {"mean", "n", "by": [[fee %, trades]]} over the trades in the
+    window, most common first, and the venue schedule (PumpSwap's steps in SOL, the fixed rates, the allowance)."""
+    by = defaultdict(int)
+    for s in sigs:
+        by[round(TRD.trade_fee(s, cfg), 3)] += 1
+    n = sum(by.values())
+    return {"n": n, "mean": round(sum(k * v for k, v in by.items()) / n, 3) if n else None,
+            "by": sorted(([k, v] for k, v in by.items()), key=lambda kv: -kv[1])[:8],
+            "pumpswap": [list(t) for t in C.PUMPSWAP_FEES], "venues": C.VENUE_FEES, "allowance": cfg["fee_pct"]}
+
+
+def note_price_check(st, held_back, now):
+    """Keep the price check's tally for the Buy & sell tab: when it started, how many coin entries it has held back,
+    and the latest ones."""
+    pc = json.loads(st.get_meta("price_check") or "null") or {"since": now, "n": 0, "scans": 0, "last": [], "last_ts": None}
+    if held_back:
+        pc["n"] += len(held_back)
+        pc["scans"] += 1
+        pc["last"], pc["last_ts"] = held_back[:10], now
+    st.set_meta("price_check", json.dumps(pc))
+    return pc
+
+
+def fee_backfill(st, cfg):
+    """The fee a side for every recorded trade and path reading that has none, from the venue recorded for the coin
+    (or its address) and its market cap, at the last SOL price the scan read. Returns (trades, readings) given one."""
+    sol = float(st.get_meta("sol_usd") or cfg["sol_usd"])
+    dex_of = st.venue_map()
+    venue = lambda mint: TRD.venue_guess(mint, dex_of.get(mint))
+    n_sig = 0
+    for s in st.sigs():
+        f = s["f"] or {}
+        if f.get("fee") is not None:
+            continue
+        f["fee"] = TRD.pool_fee(venue(s["mint"]), s.get("in_mc"), sol, cfg)
+        st.set_sig_f(s["id"], f)
+        n_sig += 1
+    n_path = st.backfill_path_fees(lambda mint, f: TRD.pool_fee(venue(mint), f.get("mc"), sol, cfg))
+    return n_sig, n_path
 
 
 def reprice_ledger(st, cfg, exits):
@@ -1127,9 +1172,12 @@ def reprice_ledger(st, cfg, exits):
     trades are judged alike. A take-profit recorded at a reading above its target is filled at the target, keeping the
     reading. A result recorded before exit liquidity was kept uses the entry's. Returns how many trades were priced
     again."""
-    key = f'{cfg["usd"]}|{cfg["fee_pct"]}|{cfg.get("tx_usd", 0)}|{LEDGER_FILLS}'
+    key = f'{cfg["usd"]}|{cfg["fee_pct"]}|{cfg.get("tx_usd", 0)}|{LEDGER_FILLS}|{FEE_MODEL}'
     if st.get_meta("ledger_costs") == key:
         return 0
+    n_fee, n_path = fee_backfill(st, cfg)       # each trade's own venue fee first, so the pricing below uses it
+    if n_fee or n_path:
+        log(f"trade ledger: venue fees given to {n_fee} paper trades and {n_path} path readings")
     n = capped = 0
     for s in st.sigs():
         out = s["out"] or {}
@@ -1140,7 +1188,7 @@ def reprice_ledger(st, cfg, exits):
             o = list(o)
             tp = (exits.get(pid) or {}).get("tp")
             if (len(o) > 4 and o[2] == "target" and tp is not None and o[4] and s["in_price"]
-                    and o[4] > s["in_price"] * (1 + tp / 100) * 1.000001):
+                    and o[4] > s["in_price"] * (1 + tp / 100) * 1.001):    # past the 4-figure rounding of a fill at target
                 read = o[6] if len(o) > 6 and o[6] else o[4]
                 o = (o + [None] * 6)[:6] + [read]
                 o[4] = LAB._r(s["in_price"] * (1 + tp / 100))
@@ -1151,8 +1199,9 @@ def reprice_ledger(st, cfg, exits):
         n += 1
     st.set_meta("ledger_costs", key)
     st.commit()
-    log(f"trade ledger: {n} paper trades priced again at ${cfg['usd']:g} a trade, {cfg['fee_pct']:g}% fees a side and "
-        f"${cfg.get('tx_usd', 0):g} a transaction; {capped} take-profits that had filled above their target now fill at it")
+    log(f"trade ledger: {n} paper trades priced again at ${cfg['usd']:g} a trade, each venue's fees a side ({cfg['fee_pct']:g}% "
+        f"where not fixed) and ${cfg.get('tx_usd', 0):g} a transaction; {capped} take-profits that had filled above their "
+        f"target now fill at it")
     return n
 
 
@@ -1229,7 +1278,7 @@ def start_minutes(st, now, ds_all, lists, exits, loaded_x, bank=None):
     if prev_ts is None or now - prev_ts > fc["stale_scan_min"] * 60:
         eligible = {}
     for m, (sc, hi) in (bank.rug_scores(eligible) if bank and eligible else {}).items():
-        eligible[m] = {**eligible[m], "rug": LAB._r(sc), "rug_hi": int(hi)}       # recorded on quick trades too
+        eligible[m] = {**eligible[m], "rug": LAB._r(sc), "rug_hi": int(hi), "rug_v": bank.rug_version}   # quick trades too
     policy = json.loads(st.get_meta("trade_policy") or "null") or {}
     rules = policy.get("rules") or []
     book = FAST.Book(st.open_sigs(), exits, rules, eligible, st.fast_last([r["id"] for r in rules if r.get("fast")]),
@@ -1326,6 +1375,8 @@ def trade_step(st, rows, ds_all, now, regime, bank=None, sampler=None, t_dec=Non
     by = {r["t"]["mint"]: r for r in rows}
     open_sigs = st.open_sigs()
     follow = st.tpath_recent(now - cfg["follow_h"] * H) | {s["mint"] for s in open_sigs}
+    prev_path = st.tpath(now - cfg["check_window_min"] * 60)   # the readings before this scan's, for the price check
+    sol_usd = (regime or {}).get("sol_usd")
     feats, path = {}, []
     for mint, r in by.items():
         code, d = path_code(r), r["d"]
@@ -1333,6 +1384,8 @@ def trade_step(st, rows, ds_all, now, regime, bank=None, sampler=None, t_dec=Non
             continue
         f = trade_features(st, r, now, regime) if code == "I" and d.get("price") else None
         if f:
+            # the pool's fee a side at this reading: what a trade opened on it pays, here and in every backtest
+            f["fee"] = TRD.pool_fee(d.get("dex"), d.get("mcap"), sol_usd, cfg)
             feats[mint] = f
         path.append([now, mint, code, d.get("price"), d.get("liq"), (d.get("chg") or {}).get("h1"), f])
     try:
@@ -1421,6 +1474,7 @@ def trade_step(st, rows, ds_all, now, regime, bank=None, sampler=None, t_dec=Non
         # minutes older than the gates the decision relied on, so buying at it would use a price nobody could have had
         # once the signal existed. Without a minute price from the last fill_lag_s seconds, the scan's reading it is.
         last_tick = {t["mint"]: t for t in (sampler.ticks if sampler is not None else ())}
+        held_back = []
         for mint, f in feats.items():
             d = by[mint]["d"]
             t = last_tick.get(mint)
@@ -1428,6 +1482,13 @@ def trade_step(st, rows, ds_all, now, regime, bank=None, sampler=None, t_dec=Non
                 fill = (t_dec, t["price"], t.get("liq"), t.get("mc") or d.get("mcap"), round(t_dec - t["ts"]))
             else:
                 fill = (now, d["price"], d.get("liq"), d.get("mcap"), round(t_dec - now))
+            # the price check: no entry on a reading out of line with the coin's last ones, the scan's or the fill's
+            before = [p for p in prev_path.get(mint, ()) if p[0] < now - 120]
+            jump = TRD.jump_check(before, d.get("price"), d.get("liq"), cfg) or TRD.jump_check(before, fill[1], fill[2], cfg)
+            if jump:
+                held_back.append({"mint": mint, "sym": d.get("symbol") or by[mint]["t"]["symbol"], "price_x": LAB._r(jump[0]),
+                                  "liq_x": LAB._r(jump[1])})
+                continue
             for rule in policy["rules"]:
                 if rule["status"] not in ("testing", "live") or rule.get("fast") or (rule["id"], mint) in busy:
                     continue
@@ -1437,8 +1498,9 @@ def trade_step(st, rows, ds_all, now, regime, bank=None, sampler=None, t_dec=Non
                 live = rule["status"] == "live" and mint not in held
                 keep = {k: f.get(k) for k in TRD.SHOWN_AT_ENTRY + [c[0] for c in rule["all"]] if f.get(k) is not None}
                 keep["lag"] = fill[4]          # seconds between the price bought at and the decision
+                keep["fee"] = f.get("fee")     # the pool's fee a side the trade pays (trade.pool_fee)
                 if mint in rug:
-                    keep["rug"], keep["rug_hi"] = LAB._r(rug[mint][0]), int(rug[mint][1])
+                    keep["rug"], keep["rug_hi"], keep["rug_v"] = LAB._r(rug[mint][0]), int(rug[mint][1]), bank.rug_version
                 if mid:                        # what the model saw: its score, its threshold, when it was trained
                     meta = (bank.entry.get(mid) or ({},))[0]
                     keep.update(sc=LAB._r(picks[mid][mint]), thr=LAB._r(meta.get("thr")), mv=round(bank.summary["trained_at"]))
@@ -1447,6 +1509,7 @@ def trade_step(st, rows, ds_all, now, regime, bank=None, sampler=None, t_dec=Non
                 opened += 1
                 if live:
                     held.add(mint)
+        note_price_check(st, held_back, now)
     st.prune_tpath(now - cfg["path_days"] * 86400)
     st.prune_sigs(now - cfg["keep_days"] * 86400, now - C.MODELS["keep_trade_days"] * 86400)
     st.prune_ticks(now - C.FAST["keep_h"] * H, now - C.FAST["feed_keep_days"] * 86400)
@@ -1455,7 +1518,9 @@ def trade_step(st, rows, ds_all, now, regime, bank=None, sampler=None, t_dec=Non
         f"coins failing a structure gate, {opened} opened at the scan"
         + (f"; models: {sum(len(v) for v in picks.values())} picks from {len(picks)} models, {len(sells)} exit-model sells"
            if bank and bank.fresh else "")
-        + (f"; rug filter: {sum(1 for v in rug.values() if v[1])} of {len(rug)} coins kept out" if rug else ""))
+        + (f"; rug filter: {sum(1 for v in rug.values() if v[1])} of {len(rug)} coins kept out" if rug else "")
+        + ("; price check held back " + ", ".join(f"{h['sym']} ({h['price_x']:.2f}x price, {h['liq_x']:.2f}x liquidity)"
+                                                  for h in held_back) if policy and held_back else ""))
     return policy, feats, changes, picks, sells, minute, closed_dec
 
 
@@ -1485,7 +1550,7 @@ def trade_page(st, policy, feats, rows, now, exit_pool=None, picks=None, sigs=No
         else:
             last = s.get("last_price") or s["in_price"]
             row.update(last_price=last, peak=peak, now_x=last / s["in_price"],
-                       now_net=LAB._r(TRD.net_ret(last / s["in_price"], s["in_liq"], s.get("last_liq"), cfg)),
+                       now_net=LAB._r(TRD.net_ret(last / s["in_price"], s["in_liq"], s.get("last_liq"), cfg, fee=TRD.trade_fee(s, cfg))),
                        levels=TRD.levels(ref, s, peak))
         return row
 
@@ -1573,7 +1638,9 @@ def trade_page(st, policy, feats, rows, now, exit_pool=None, picks=None, sigs=No
                  for k, v in (policy.get("vars") or {}).items()]
     return {"cfg": {k: cfg.get(k) for k in ("usd", "fee_pct", "tx_usd", "reentry_h", "min_trades", "min_edge", "z", "promote_after",
                                         "retire_after", "every_days", "path_days", "switch_after", "switch_min_gain",
-                                        "var_min_rho", "warn_gap")},
+                                        "var_min_rho", "warn_gap", "check_price_x", "check_liq_x", "check_window_min")},
+            "fees": fee_summary(sigs, cfg),
+            "price_check": json.loads(st.get_meta("price_check") or "null"),
             "last_review": policy.get("last_review"), "next_review": policy.get("next_review"),
             "exit": {"id": policy["exit"], "label": TRD.exit_label(exits[policy["exit"]]),
                      "params": {k: v for k, v in exits[policy["exit"]].items() if k not in ("id", "label")}},
@@ -1595,19 +1662,25 @@ def pnl_by_rule(sigs, older, carried, rules, cfg, now, series_for=lambda rid: ri
     "series": a cumulative realised series for the rules series_for picks (the models), by close time on one time axis:
     {t0, step, v: {rule: [$ at the end of each step]}}}; peak is the most trades open at once among those still stored;
     pulled the closed trades a liquidity pull ended; filt, for the trades opened since the rug model ran, the same
-    split by its call ({"kept"|"out": {total, n, n_open, pulled}})."""
+    split by its call ({"kept"|"out": {total, n, n_open, pulled}}), and filt2 the same for the trades opened since its
+    cut for older coins (rug_v 2)."""
     usd = cfg["usd"]
     acc = {rid: {"since": r.get("added"), "real": 0.0, "open": 0.0, "n": 0, "n_open": 0, "wins": 0, "first": None,
                  "pulled": 0, "pulled_usd": 0.0} for rid, r in rules.items()}
     ev, marks = defaultdict(list), defaultdict(list)
-    filt = {}                                  # rule -> {"kept"|"out": [$ total, closed, open, pulled]}
+    filt, filt2 = {}, {}                       # rule -> {"kept"|"out": [$ total, closed, open, pulled]}
+    blank = lambda: {"kept": [0.0, 0, 0, 0], "out": [0.0, 0, 0, 0]}
     for s in list(older) + list(sigs):
         a = acc.get(s["rule"])
         if a is None or s["in_ts"] < (a["since"] or 0):
             continue
         o = (s["out"] or {}).get(s["ref"])
-        hi = (s.get("f") or {}).get("rug_hi")  # the rug filter's call at the decision, on trades opened since it ran
-        b = None if hi is None else filt.setdefault(s["rule"], {"kept": [0.0, 0, 0, 0], "out": [0.0, 0, 0, 0]})["out" if hi else "kept"]
+        sf = s.get("f") or {}
+        hi = sf.get("rug_hi")                  # the rug filter's call at the decision, on trades opened since it ran
+        side = "out" if hi else "kept"
+        bs = [] if hi is None else [filt.setdefault(s["rule"], blank())[side]]
+        if hi is not None and (sf.get("rug_v") or 1) >= 2:
+            bs.append(filt2.setdefault(s["rule"], blank())[side])
         if o:
             v = o[0] / 100 * usd
             a["real"] += v
@@ -1617,7 +1690,7 @@ def pnl_by_rule(sigs, older, carried, rules, cfg, now, series_for=lambda rid: ri
             if pulled:
                 a["pulled"] += 1
                 a["pulled_usd"] += v
-            if b is not None:
+            for b in bs:
                 b[0] += v
                 b[1] += 1
                 b[3] += 1 if pulled else 0
@@ -1625,10 +1698,10 @@ def pnl_by_rule(sigs, older, carried, rules, cfg, now, series_for=lambda rid: ri
             marks[s["rule"]] += [(s["in_ts"], 1), (o[3], -1)]
         elif not s.get("done") and s["in_price"]:
             last = s.get("last_price") or s["in_price"]
-            v = TRD.net_ret(last / s["in_price"], s["in_liq"], s.get("last_liq"), cfg) / 100 * usd
+            v = TRD.net_ret(last / s["in_price"], s["in_liq"], s.get("last_liq"), cfg, fee=TRD.trade_fee(s, cfg)) / 100 * usd
             a["open"] += v
             a["n_open"] += 1
-            if b is not None:
+            for b in bs:
                 b[0] += v
                 b[2] += 1
             marks[s["rule"]].append((s["in_ts"], 1))
@@ -1655,8 +1728,9 @@ def pnl_by_rule(sigs, older, carried, rules, cfg, now, series_for=lambda rid: ri
             peak = max(peak, cur)
         out[rid] = {**a, "real": round(a["real"], 2), "open": round(a["open"], 2), "total": round(a["real"] + a["open"], 2),
                     "peak": peak, "pulled_usd": round(a["pulled_usd"], 2)}
-        if rid in filt:
-            out[rid]["filt"] = {k: {"total": round(v[0], 2), "n": v[1], "n_open": v[2], "pulled": v[3]} for k, v in filt[rid].items()}
+        for key, src in (("filt", filt), ("filt2", filt2)):
+            if rid in src:
+                out[rid][key] = {k: {"total": round(v[0], 2), "n": v[1], "n_open": v[2], "pulled": v[3]} for k, v in src[rid].items()}
     pick = {rid: sorted(v) for rid, v in ev.items() if series_for(rid)}
     series = None
     ts = [t for v in pick.values() for t, _x in v]
@@ -1739,7 +1813,7 @@ def quick_page(st, policy, bench, sigs, exits, by_rule, now, minute):
             row.update(ret=o[0], h=o[1], why=o[2], out_ts=o[3])
         else:
             last = s.get("last_price") or s["in_price"]
-            row.update(now_net=LAB._r(TRD.net_ret(last / s["in_price"], s["in_liq"], s.get("last_liq"), cfg)))
+            row.update(now_net=LAB._r(TRD.net_ret(last / s["in_price"], s["in_liq"], s.get("last_liq"), cfg, fee=TRD.trade_fee(s, cfg))))
         trades.append(row)
     base = C.FAST["baseline_exit"] if C.FAST["baseline_exit"] in exits else next(iter(exits))
     entries = TRD.pooled({rid: by_rule.get(rid, []) for rid in quick})
@@ -1759,12 +1833,13 @@ ENTRY_KEYS = ("id", "slug", "algo", "family", "kind", "set", "n_vars", "n_test",
               "pick_kept_t")
 RUG_KEYS = ("status", "algo", "label", "share", "hours", "samples", "rugs", "base", "n_vars", "n_test", "rugs_test", "base_test",
             "auc", "ap", "train_auc", "gap", "flag_share", "caught", "rate_flagged", "rate_kept", "net_flagged", "net_kept",
-            "net_all", "kept_t", "deciles", "leading", "error")
+            "net_all", "kept_t", "deciles", "leading", "error", "old_h", "old_share", "thr", "thr_old", "ages")
 
 
-def filter_groups(pnl_rules, rules):
+def filter_groups(pnl_rules, rules, key="filt"):
     """The rug filter's split, summed over every model (the random control apart), the random control, the scan's
-    rules and the quick rules: {group: {"kept"|"out": {total, n, n_open, pulled}}}, from trades opened since it ran."""
+    rules and the quick rules: {group: {"kept"|"out": {total, n, n_open, pulled}}}, from trades opened since it ran
+    (key "filt") or since its cut for older coins (key "filt2")."""
     groups = {"models": lambda r: r.get("model") and r["id"] != "m:" + MOD_RANDOM, "random": lambda r: r["id"] == "m:" + MOD_RANDOM,
               "rules": lambda r: not r.get("model") and not r.get("fast"), "quick": lambda r: r.get("fast")}
     out = {}
@@ -1772,11 +1847,11 @@ def filter_groups(pnl_rules, rules):
         acc = {k: {"total": 0.0, "n": 0, "n_open": 0, "pulled": 0} for k in ("kept", "out")}
         for rid, p in pnl_rules.items():
             r = rules.get(rid)
-            if not r or not p.get("filt") or not pick(r):
+            if not r or not p.get(key) or not pick(r):
                 continue
             for k in ("kept", "out"):
                 for f in ("total", "n", "n_open", "pulled"):
-                    acc[k][f] += p["filt"][k][f]
+                    acc[k][f] += p[key][k][f]
         if any(acc[k]["n"] + acc[k]["n_open"] for k in acc):
             out[g] = {k: {**v, "total": round(v["total"], 2)} for k, v in acc.items()}
     return out
@@ -1865,7 +1940,7 @@ def models_page(st, bank, policy, tpage, now, picks, sells, sigs=None, pnl=None)
             row.update(ret=o[0], h=o[1], why=o[2], out_ts=o[3])
         else:
             last = s.get("last_price") or s["in_price"]
-            row.update(now_net=LAB._r(TRD.net_ret(last / s["in_price"], s["in_liq"], s.get("last_liq"), cfg)),
+            row.update(now_net=LAB._r(TRD.net_ret(last / s["in_price"], s["in_liq"], s.get("last_liq"), cfg, fee=TRD.trade_fee(s, cfg))),
                        x_sell=sell_now.get(s["id"], []))
         x_out = {pid: [v[0], v[3]] for pid, v in (s["out"] or {}).items() if pid.startswith("x:")}
         if x_out:
@@ -1897,6 +1972,7 @@ def models_page(st, bank, policy, tpage, now, picks, sells, sigs=None, pnl=None)
                rug={**{k: rug.get(k) for k in RUG_KEYS if k in rug}, "leading": (rug.get("leading") or [])[:6],
                     "loaded": bool(bank and getattr(bank, "rug", None))} if rug else None,
                rug_groups=filter_groups((pnl or {}).get("rules") or {}, rules),
+               rug_groups_v2=filter_groups((pnl or {}).get("rules") or {}, rules, "filt2"),
                pairs=[list(p) for p in MOD.PAIRS] if MOD else [],
                pair_stats=pair_records(by_rule, rules, {e["id"] for e in entry if not e.get("error")},
                                        MOD.PAIRS if MOD else [], cfg, now))
@@ -2000,7 +2076,9 @@ def run(args):
         if sampler:
             sampler.stop()
         raise
-    regime = regime_of(rows, (sol.get("chg") or {}).get("h24"))
+    regime = regime_of(rows, (sol.get("chg") or {}).get("h24"), sol.get("price"))
+    if sol.get("price"):
+        st.set_meta("sol_usd", str(sol["price"]))  # for pricing older trades and the training history's fees
     n_obs = observe(st, rows, now, regime)
     log(f"lab: {n_obs} observations recorded, {n_up} open ones updated")
     policy, gmeta, changes = weekly_review(st, rows, now, policy)

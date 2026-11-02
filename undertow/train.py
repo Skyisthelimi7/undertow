@@ -25,17 +25,26 @@ def sync_history(db_path, hist_path, now, keep_days):
     src = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     rows = src.execute("SELECT ts, mint, st, price, liq, c1h, f FROM tpath WHERE ts>? ORDER BY ts", (last,)).fetchall()
     policy = src.execute("SELECT v FROM meta WHERE k='trade_policy'").fetchone()
+    # readings from before the scan recorded each coin's pool fee (2 Nov 2026) get it here, from the coin's venue
+    dex_of = {m: d or "" for m, d in src.execute("SELECT mint, dex FROM tokens")}
+    sol = src.execute("SELECT v FROM meta WHERE k='sol_usd'").fetchone()
+    sol = float(sol[0]) if sol else C.TRADE["sol_usd"]
     src.close()
     h.executemany("INSERT INTO tpath VALUES(?,?,?,?,?,?,?)", rows)
     h.execute("DELETE FROM tpath WHERE ts<?", (now - keep_days * 86400,))
     h.commit()
     n = h.execute("SELECT COUNT(*), MIN(ts) FROM tpath").fetchone()
-    out = {}
+    out, filled = {}, 0
     for ts, mint, st, price, liq, c1h, f in h.execute("SELECT ts, mint, st, price, liq, c1h, f FROM tpath ORDER BY mint, ts"):
-        out.setdefault(mint, []).append((ts, st, price, liq, c1h, json.loads(f) if f else None))
+        f = json.loads(f) if f else None
+        if f is not None and f.get("fee") is None:
+            f["fee"] = MOD.TRD.pool_fee(MOD.TRD.venue_guess(mint, dex_of.get(mint)), f.get("mc"), sol, C.TRADE)
+            filled += 1
+        out.setdefault(mint, []).append((ts, st, price, liq, c1h, f))
     h.close()
     log(f"history: {len(rows)} new path rows, {n[0]} kept since "
-        f"{time.strftime('%d %b %H:%M', time.gmtime(n[1])) if n[1] else 'n/a'} on {len(out)} coins")
+        f"{time.strftime('%d %b %H:%M', time.gmtime(n[1])) if n[1] else 'n/a'} on {len(out)} coins"
+        + (f"; {filled} readings given their venue's fee (SOL ${sol:,.0f})" if filled else ""))
     return out, json.loads(policy[0]) if policy else None
 
 
