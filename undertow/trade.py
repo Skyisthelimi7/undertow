@@ -131,12 +131,17 @@ def cost_pct(liq, usd, fee, tx_usd=0.0):
 
 def net_ret(x, liq_in, liq_out, cfg, usd=None, fee=None):
     """Net return in % for a price multiple x, after paying costs to get in and to get out, on a position of usd
-    dollars (the ledger's size when not given). fee: the pool's fee a side in % (the trade's venue, pool_fee); the
-    ledger's allowance cfg["fee_pct"] when not given."""
+    dollars (the ledger's size when not given). The sale's price impact and network fee are on what the position is
+    worth when sold (its tokens at the exit price), not on what it cost: in a deep pool the two barely differ, but a
+    position whose price rose in a drained pool sells for far less than that price says (3 Nov 2026: tokens bought for
+    $100 that read 3.95x in a $227 pool fetch about $87, not $207). fee: the pool's fee a side in % (the trade's venue,
+    pool_fee); the ledger's allowance cfg["fee_pct"] when not given."""
     usd = usd or cfg["usd"]
     fee = cfg["fee_pct"] if fee is None else fee
-    c0 = cost_pct(liq_in, usd, fee, cfg.get("tx_usd", 0.0)) / 100
-    c1 = cost_pct(liq_out, usd, fee, cfg.get("tx_usd", 0.0)) / 100
+    tx = cfg.get("tx_usd", 0.0)
+    c0 = cost_pct(liq_in, usd, fee, tx) / 100
+    worth = max(usd * x * (1 - c0), 0.01)          # the tokens bought, at the exit price, before selling them
+    c1 = cost_pct(liq_out, worth, fee, tx) / 100
     return (x * (1 - c0) * (1 - c1) - 1) * 100
 
 

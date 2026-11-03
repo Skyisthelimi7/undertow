@@ -1122,6 +1122,7 @@ def exit_pool_of(bank):
 
 LEDGER_FILLS = "tp-at-target"                  # how sales fill (trade.step); a change prices the ledger again
 FEE_MODEL = "venue-v1"                          # how fees are set (trade.pool_fee); a change prices the ledger again
+IMPACT_MODEL = "exit-worth"                     # a sale's impact on the position's worth then (trade.net_ret); likewise
 
 
 def fee_summary(sigs, cfg):
@@ -1172,7 +1173,7 @@ def reprice_ledger(st, cfg, exits):
     trades are judged alike. A take-profit recorded at a reading above its target is filled at the target, keeping the
     reading. A result recorded before exit liquidity was kept uses the entry's. Returns how many trades were priced
     again."""
-    key = f'{cfg["usd"]}|{cfg["fee_pct"]}|{cfg.get("tx_usd", 0)}|{LEDGER_FILLS}|{FEE_MODEL}'
+    key = f'{cfg["usd"]}|{cfg["fee_pct"]}|{cfg.get("tx_usd", 0)}|{LEDGER_FILLS}|{FEE_MODEL}|{IMPACT_MODEL}'
     if st.get_meta("ledger_costs") == key:
         return 0
     n_fee, n_path = fee_backfill(st, cfg)       # each trade's own venue fee first, so the pricing below uses it
@@ -1200,8 +1201,8 @@ def reprice_ledger(st, cfg, exits):
     st.set_meta("ledger_costs", key)
     st.commit()
     log(f"trade ledger: {n} paper trades priced again at ${cfg['usd']:g} a trade, each venue's fees a side ({cfg['fee_pct']:g}% "
-        f"where not fixed) and ${cfg.get('tx_usd', 0):g} a transaction; {capped} take-profits that had filled above their "
-        f"target now fill at it")
+        f"where not fixed), ${cfg.get('tx_usd', 0):g} a transaction and a sale's impact on what the position is worth then; "
+        f"{capped} take-profits that had filled above their target now fill at it")
     return n
 
 

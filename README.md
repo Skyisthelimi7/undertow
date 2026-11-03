@@ -244,6 +244,14 @@ traded that high within a minute, 4 only 6 to 13 minutes after the reading, and 
   average fee a side came to 0.97% and the ledger's results moved from -5.66% to -5.60% a trade (20 Oct to 2 Nov).
   The losses are not the fee allowance's doing. A trading bot would add about 1% a side; this leaves it out.
 
+* **A sale's impact (since 3 November 2026).** Selling pays price impact and the network fee on what the position is
+  worth when sold (its tokens at the exit price), not on the $100 it cost. In a deep pool the two barely differ; in a
+  drained one they are far apart. On 3 November iNu's pool was pulled to $227 while its price read about 4 times the
+  entry: 35 trades had been booked at +100% to +125% as if $100 of impact could sell $400 of tokens into that pool,
+  where the pool's $114 of SOL gives about $87 for them (-12% to -14%). Every recorded trade was priced again: $3.6k
+  less in all, almost all of it iNu's, slightly offset by collapsed positions, which sell for little and so pay little
+  impact.
+
 * **Price check before entry (since 2 November 2026).** No buy on a reading out of line with the coin's last ones: a
   price 1.5 times (or two thirds) the median of its last three readings in 90 minutes, with its liquidity moved the
   same way by 1.3 times, waits until later readings confirm the level. One scan read Jimothy (107 days old, a $335k

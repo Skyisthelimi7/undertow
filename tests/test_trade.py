@@ -46,6 +46,23 @@ class Rules(unittest.TestCase):
         # a flat price loses both sides' costs
         self.assertAlmostEqual(T.net_ret(1.0, 1e9, 1e9, {"usd": 500, "fee_pct": 1.0}), ((1 - 0.01) ** 2 - 1) * 100, places=3)
 
+    def test_a_sale_pays_impact_on_what_the_position_is_worth_then(self):
+        cfg = {"usd": 100, "fee_pct": 0.25, "tx_usd": 0.05}
+        # a price that read 3.95x in a pool drained to $227: the tokens fetch what the pool's $113.5 of SOL gives for
+        # them (about $87), not 3.95x less $100's worth of impact (the old formula's $207)
+        c0 = T.cost_pct(43_847, 100, 0.25, 0.05) / 100
+        worth = 100 * 3.95 * (1 - c0)
+        fetched = worth * (1 - worth / (113.55 + worth) - 0.0025) - 0.05
+        self.assertAlmostEqual(T.net_ret(3.95, 43_847, 227.1, cfg), fetched - 100, places=1)
+        self.assertLess(T.net_ret(3.95, 43_847, 227.1, cfg), -10)
+        # in a deep pool the position's size at the sale hardly matters
+        self.assertAlmostEqual(T.net_ret(1.1, 50_000, 50_000, cfg),
+                               (1.1 * (1 - T.cost_pct(50_000, 100, 0.25, 0.05) / 100)
+                                * (1 - T.cost_pct(50_000, 100, 0.25, 0.05) / 100) - 1) * 100, places=1)
+        # a collapsed position sells for little and pays little impact; nothing is ever worse than losing it all
+        self.assertGreater(T.net_ret(0.3, 50_000, 2_000, cfg), (0.3 * (1 - c0) * (1 - T.cost_pct(2_000, 100, 0.25, 0.05) / 100) - 1) * 100)
+        self.assertEqual(T.net_ret(0.0, 50_000, 0, cfg), -100.0)
+
 
 class Exits(unittest.TestCase):
     cfg = {"usd": 500, "fee_pct": 0.0}
