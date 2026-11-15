@@ -265,13 +265,15 @@ TG_KEEP_DAYS = 8                  # Telegram member counts, for growth rates
 # the next, true reading. From 27 Oct to 2 Nov 2026 the check would have held back 624 of 42,597 trades on 66 coins,
 # 102 of the 107 opened on a reading out of line with the readings either side; the 522 others lost 11% each against
 # 5.5% for the rest (a coin that just jumped, or whose pool just shrank with its price, is a poor buy anyway).
+# check_flip_x (15 Nov 2026): a liquidity that far off the median either way is held back whatever the price did (a
+# pool flip the price test misses; backtested on 2-15 Nov it would have held back one trade of 12,665, a 62% "loss").
 # sol_usd: the SOL price for PumpSwap's market-cap tiers when the scan has no reading of its own.
 TRADE = {"usd": 100, "fee_pct": 1.0, "tx_usd": 0.05, "sol_usd": 95.0, "sizes": (25, 100, 500), "reentry_h": 24, "follow_h": 48,
          "max_miss": 3, "liq_pull": 0.5, "path_days": 14, "window_days": 28, "keep_days": 60, "every_days": 7, "min_trades": 30, "min_edge": 1.0, "z": 2.0,
          "promote_after": 2, "retire_after": 2, "max_promotions": 1, "max_live": 2, "testing": 40, "add_per_review": 4,
          "stale_after": 6, "retest_after_days": 56, "switch_min_gain": 1.0, "switch_after": 2,
          "var_min_n": 300, "var_min_rho": 0.05, "var_retire_after": 3, "warn_gap": 2.0,
-         "check_price_x": 1.5, "check_liq_x": 1.3, "check_window_min": 90}
+         "check_price_x": 1.5, "check_liq_x": 1.3, "check_flip_x": 2.0, "check_window_min": 90}
 # Pool fees a side (2 Nov 2026). PUMPSWAP_FEES: pump.fun's dynamic fees on PumpSwap by the coin's market cap in SOL, as
 # (from, total %): LP 0.20% and protocol 0.05% plus a creator fee stepping down from 0.95% at 420 SOL to 0.05% from
 # 98,240 SOL, and 1.25% below 420 SOL (0.93% protocol, 0.30% creator, 0.02% LP). The steps at 420, 1,470, 9,820,

@@ -1026,15 +1026,21 @@ doc.addEventListener('click',function(e){var b=e.target.closest&&e.target.closes
 
 /* ---------- start: an embedded snapshot paints at once; data.json next to the page replaces it and is re-read every 5 minutes ---------- */
 function embedded(){var e=$('#data');try{return e?JSON.parse(e.textContent):null;}catch(x){return null;}}
+/* GitHub Pages sometimes serves old files for days after a deploy; each scan also pushes data.json and version.json to the
+   data branch, read from raw.githubusercontent.com. Both are asked and the newer scan wins. */
+var RAW='https://raw.githubusercontent.com/Skyisthelimi7/undertow/data/';
+function fetchJSON(u){return fetch(u+'?t='+Date.now(),{cache:'no-store'}).then(function(r){if(!r.ok)throw 0;return r.json();}).catch(function(){return null;});}
+function newest(f){return Promise.all([fetchJSON(f),/\.github\.io$/.test(location.hostname)?fetchJSON(RAW+f):Promise.resolve(null)]).then(function(a){
+  var x=a[0],y=a[1];return (y&&(!x||y.generated_at>x.generated_at))?y:x;});}
 function loadData(){
-  return fetch('data.json?t='+Date.now(),{cache:'no-store'}).then(function(r){if(!r.ok)throw 0;return r.json();})
+  return newest('data.json')
     .then(function(d){if(d&&d.tokens&&(!D||d.generated_at>D.generated_at)){boot(d);return true;}return false;}).catch(function(){return false;});
 }
 /* a newer scan is spotted from version.json (a few bytes) before the full data is fetched */
 function checkForUpdate(manual){
   if(!SERVED)return Promise.resolve();
-  return fetch('version.json?t='+Date.now(),{cache:'no-store'}).then(function(r){if(!r.ok)throw 0;return r.json();})
-    .then(function(v){if(v&&D&&v.generated_at>D.generated_at+1)return loadData().then(function(ok){if(ok)toast('Updated with the '+hhmm(D.generated_at)+' scan');});
+  return newest('version.json')
+    .then(function(v){if(!v)throw 0;if(v&&D&&v.generated_at>D.generated_at+1)return loadData().then(function(ok){if(ok)toast('Updated with the '+hhmm(D.generated_at)+' scan');});
       if(manual)toast('Showing the latest scan, from '+hhmm(D.generated_at));})
     .catch(function(){return loadData().then(function(ok){if(manual)toast(ok?'Updated with the '+hhmm(D.generated_at)+' scan':'Showing the latest scan, from '+hhmm(D.generated_at));});});
 }

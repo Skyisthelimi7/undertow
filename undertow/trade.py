@@ -188,8 +188,10 @@ def jump_check(prev, price, liq, cfg):
     """The price check before entry: (price ratio, liquidity ratio) when a reading is out of line with the coin's
     previous ones, else None. prev: its earlier readings as path rows (ts, state, price, liq, ...), oldest first; the
     last three count, through their medians. Out of line: the price check_price_x times (or 1/check_price_x of) the
-    median with the liquidity moved the same way by check_liq_x or more. A real move passes once later readings carry
-    the new level into the median; a bad reading never does."""
+    median with the liquidity moved the same way by check_liq_x or more. Also out of line, whatever the price did: a
+    liquidity check_flip_x times (or 1/check_flip_x of) the median, which is a different pool's reading (CLANKER, 9 Nov
+    2026: its price up with a collapsed pool, bought and "lost" 62% at the next reading). A real move passes once later
+    readings carry the new level into the median; a bad reading never does."""
     pts = [(r[2], r[3]) for r in prev if r[2]][-3:]
     if not pts or not price or not liq:
         return None
@@ -199,7 +201,8 @@ def jump_check(prev, price, liq, cfg):
     pr = price / statistics.median(p for p, _l in pts)
     lr = liq / statistics.median(liqs)
     px, lx = cfg["check_price_x"], cfg["check_liq_x"]
-    if (pr >= px and lr >= lx) or (pr <= 1 / px and lr <= 1 / lx):
+    fx = cfg.get("check_flip_x", 2.0)
+    if (pr >= px and lr >= lx) or (pr <= 1 / px and lr <= 1 / lx) or lr >= fx or lr <= 1 / fx:
         return pr, lr
     return None
 

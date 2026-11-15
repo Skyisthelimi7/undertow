@@ -12,7 +12,7 @@ on:
     branches: [main]
     paths: ["undertow/**", "web/**", "build_page.py", "seed/**", "requirements-ml.txt", ".github/workflows/scan.yml"]
 permissions:
-  contents: read
+  contents: write                # the data branch (below); the code is only read
   pages: write
   id-token: write
   actions: write                 # lets each run start the next one
@@ -83,6 +83,26 @@ jobs:
         with:
           path: state/undertow.db
           key: undertow-db-${{ github.run_id }}-${{ github.run_attempt }}
+      # GitHub Pages has served old files for days after a deploy that reported success (7, 9-12, 13-15 Nov 2026), so
+      # the page's data also goes to the data branch (one commit, replaced each scan), which the page reads from
+      # raw.githubusercontent.com and uses when it is newer than the data Pages serves. A failure here costs nothing.
+      - name: Publish the data outside Pages
+        if: ${{ !cancelled() && steps.prep.outputs.go == 'true' }}
+        continue-on-error: true
+        timeout-minutes: 5
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          d=$(mktemp -d)
+          cp site/data.json "$d"/
+          [ -f site/version.json ] && cp site/version.json "$d"/
+          cd "$d"
+          git init -q -b data
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -q -m "scan data $(date -u +%FT%TZ)"
+          git push -q --force "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" data
       - if: steps.prep.outputs.go == 'true'
         uses: actions/upload-pages-artifact@v3
         with: { path: site }

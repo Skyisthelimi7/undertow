@@ -259,6 +259,10 @@ traded that high within a minute, 4 only 6 to 13 minutes after the reading, and 
   27 October to 2 November the check would have held back 624 of 42,597 trades, catching 102 of the 107 opened on a
   reading out of line with the readings either side; the other 522 it held back lost 11% each against 5.5% for the
   rest, since a coin that has just jumped, or whose pool has just shrunk with its price, is a poor buy anyway.
+  Since 15 November a liquidity twice (or half) the median is also held back whatever the price did: a pool flip the
+  price test missed (CLANKER, 9 November: price up, pool collapsed, bought and "lost" 62%). Over 2-15 November it
+  touches one trade of 12,665. Over 2-15 November, 83 of the 109 hold-backs after a price jump were lower 4 hours
+  later (against about 58% of all readings that pass the gates); hold-backs after a drop were neutral (26 of 49).
 
 * **Bet size.** The ledger was kept at $500 a trade until 22 October 2026, then at $100, with every recorded result
   priced again from its entry and exit prices. Price impact is the one cost a smaller position shrinks: on a $50k pool
@@ -515,6 +519,12 @@ top-10 and developer shares from Jupiter, and the linked-wallet, bundle and rugg
 and pass. The page says so in its summary line. GeckoTerminal and Jupiter rate limits only slow a run down.
 
 ## Free hosting
+
+GitHub Pages has more than once served old files for days after a deploy that reported success (7 November, 9-12
+November, 13-15 November 2026). Each scan therefore also pushes `data.json` and `version.json` as a single commit to
+the `data` branch, and the page, when served from github.io, reads both its own copy and
+`raw.githubusercontent.com/Skyisthelimi7/undertow/data/` and shows the newer scan. The page's own HTML still comes
+from Pages.
 
 `.github/workflows/scan.yml` scans, deploys `site/` to GitHub Pages, and then starts the next run itself, so a new
 scan begins as soon as one ends (about every 15 to 20 minutes). GitHub's own scheduler often drops crons this

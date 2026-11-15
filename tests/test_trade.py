@@ -661,6 +661,15 @@ class PriceCheck(unittest.TestCase):
         moved = self.rows((1.0, 100_000), (2.0, 160_000), (2.0, 160_000))
         self.assertIsNone(T.jump_check(moved, 2.0, 160_000, cfg))              # a real move passes once readings carry it
 
+    def test_a_pool_flip_is_held_back_whatever_the_price_did(self):
+        cfg = C.TRADE
+        prev = self.rows((1.0, 100_000), (1.02, 101_000), (0.99, 99_000))
+        self.assertIsNotNone(T.jump_check(prev, 1.8, 20_000, cfg))             # CLANKER: price up, pool collapsed
+        self.assertIsNotNone(T.jump_check(prev, 1.0, 40_000, cfg))             # price flat, pool 2.5x smaller
+        self.assertIsNotNone(T.jump_check(prev, 0.9, 250_000, cfg))            # price down, pool 2.5x bigger
+        self.assertIsNone(T.jump_check(prev, 1.8, 70_000, cfg))                # a pool 30% smaller is not a flip
+        self.assertIsNone(T.jump_check(prev, 1.0, 180_000, cfg))               # nor one 1.8x bigger
+
     def test_the_ledger_skips_a_coin_read_out_of_line(self):
         st = Store(os.path.join(tempfile.mkdtemp(), "t.db"))
         feat = SC.trade_features
